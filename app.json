@@ -1,0 +1,54 @@
+{
+  "expo": {
+    "name": "The Pedal Collaborative",
+    "slug": "tpc-app",
+    "scheme": "tpc",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-white.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FFFFFF"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.thepedalcollaborative.app",
+      "buildNumber": "1",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Allow access to take pedal photos.",
+        "NSPhotoLibraryUsageDescription": "Allow access to select pedal photos.",
+        "NSPhotoLibraryAddUsageDescription": "Allow access to save pedal photos.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "plugins": [
+      "expo-font",
+      "expo-secure-store",
+      "@react-native-community/datetimepicker",
+      "expo-web-browser",
+      "expo-apple-authentication",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#2BB5A0",
+          "defaultChannel": "default"
+        }
+      ]
+    ],
+    "extra": {
+      "supabaseUrl": "https://skejiotfywhmnvsivfsk.supabase.co",
+      "supabaseAnonKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNrZWppb3RmeXdobW52c2l2ZnNrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMwNzYzOTYsImV4cCI6MjA4ODY1MjM5Nn0.N8EUIqa93IpHqOOEDcL1EWSpMicttbVTiaBK6n_Jkrk",
+      "revenueCatApiKey": "appl_VYQDDIBgZQgjoaTYvVnRfPYeiGu",
+      "betaFullAccess": true,
+      "eas": {
+        "projectId": "60bb4c47-9989-4358-a40f-980e7544cdaf"
+      }
+    }
+  }
+}

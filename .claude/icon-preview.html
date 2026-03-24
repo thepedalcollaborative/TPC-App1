@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tab Icon Preview</title>
+<script type="module" src="https://unpkg.com/ionicons@7.1.0/dist/ionicons/ionicons.esm.js"></script>
+<script nomodule src="https://unpkg.com/ionicons@7.1.0/dist/ionicons/ionicons.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #1C2B35;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    padding: 40px 32px;
+    color: #fff;
+  }
+  h2 {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #6B8FA3;
+    margin-bottom: 20px;
+  }
+  .section { margin-bottom: 40px; }
+  .row {
+    display: flex;
+    gap: 12px;
+  }
+  .option {
+    background: #243642;
+    border-radius: 14px;
+    padding: 20px 28px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    border: 1.5px solid transparent;
+    transition: border-color 0.15s;
+  }
+  .option:hover { border-color: #2BB5A0; }
+  .option.active {
+    background: linear-gradient(135deg, #2BB5A0, #1A8A78);
+    border-color: transparent;
+  }
+  .option ion-icon {
+    font-size: 26px;
+    color: #2BB5A0;
+  }
+  .option.active ion-icon { color: #fff; }
+  .label {
+    font-size: 12px;
+    font-weight: 500;
+    color: #6B8FA3;
+  }
+  .option.active .label { color: rgba(255,255,255,0.85); }
+  .name {
+    font-size: 10px;
+    color: #3D5261;
+    font-family: monospace;
+    margin-top: 2px;
+    text-align: center;
+  }
+  .option.active .name { color: rgba(255,255,255,0.45); }
+  .current {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .current-chip {
+    background: #1C3040;
+    border: 1px solid #2E4555;
+    border-radius: 8px;
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: #8AABB9;
+  }
+  .divider {
+    border: none;
+    border-top: 1px solid #243642;
+    margin: 12px 0 28px;
+  }
+  .rec { color: #2BB5A0; font-size: 11px; font-weight: 600; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div class="section">
+  <h2>Current</h2>
+  <div class="current">
+    <div class="current-chip">🎸 Owned</div>
+    <div class="current-chip">❤️ Wishlist</div>
+    <div class="current-chip">📦 Previous</div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<div class="section">
+  <h2>Owned</h2>
+  <div class="row">
+    <div class="option active">
+      <ion-icon name="cube-outline"></ion-icon>
+      <span class="label">Owned</span>
+      <span class="name">cube-outline</span>
+      <span class="rec">⭐ my pick</span>
+    </div>
+    <div class="option">
+      <ion-icon name="checkmark-circle-outline"></ion-icon>
+      <span class="label">Owned</span>
+      <span class="name">checkmark-circle-outline</span>
+    </div>
+    <div class="option">
+      <ion-icon name="albums-outline"></ion-icon>
+      <span class="label">Owned</span>
+      <span class="name">albums-outline</span>
+    </div>
+    <div class="option">
+      <ion-icon name="bag-outline"></ion-icon>
+      <span class="label">Owned</span>
+      <span class="name">bag-outline</span>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Wishlist</h2>
+  <div class="row">
+    <div class="option active">
+      <ion-icon name="bookmark-outline"></ion-icon>
+      <span class="label">Wishlist</span>
+      <span class="name">bookmark-outline</span>
+      <span class="rec">⭐ my pick</span>
+    </div>
+    <div class="option">
+      <ion-icon name="heart-outline"></ion-icon>
+      <span class="label">Wishlist</span>
+      <span class="name">heart-outline</span>
+    </div>
+    <div class="option">
+      <ion-icon name="star-outline"></ion-icon>
+      <span class="label">Wishlist</span>
+      <span class="name">star-outline</span>
+    </div>
+    <div class="option">
+      <ion-icon name="list-outline"></ion-icon>
+      <span class="label">Wishlist</span>
+      <span class="name">list-outline</span>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Previous</h2>
+  <div class="row">
+    <div class="option active">
+      <ion-icon name="archive-outline"></ion-icon>
+      <span class="label">Previous</span>
+      <span class="name">archive-outline</span>
+      <span class="rec">⭐ my pick</span>
+    </div>
+    <div class="option">
+      <ion-icon name="time-outline"></ion-icon>
+      <span class="label">Previous</span>
+      <span class="name">time-outline</span>
+    </div>
+    <div class="option">
+      <ion-icon name="hourglass-outline"></ion-icon>
+      <span class="label">Previous</span>
+      <span class="name">hourglass-outline</span>
+    </div>
+    <div class="option">
+      <ion-icon name="return-down-back-outline"></ion-icon>
+      <span class="label">Previous</span>
+      <span class="name">return-down-back</span>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
