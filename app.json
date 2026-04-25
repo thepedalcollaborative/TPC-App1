@@ -8,8 +8,6 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "splash": {
-      "image": "./assets/splash-white.png",
-      "resizeMode": "contain",
       "backgroundColor": "#FFFFFF"
     },
     "assetBundlePatterns": [
@@ -42,10 +40,7 @@
       ]
     ],
     "extra": {
-      "supabaseUrl": "https://skejiotfywhmnvsivfsk.supabase.co",
-      "supabaseAnonKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNrZWppb3RmeXdobW52c2l2ZnNrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMwNzYzOTYsImV4cCI6MjA4ODY1MjM5Nn0.N8EUIqa93IpHqOOEDcL1EWSpMicttbVTiaBK6n_Jkrk",
-      "revenueCatApiKey": "appl_VYQDDIBgZQgjoaTYvVnRfPYeiGu",
-      "betaFullAccess": true,
+      "betaFullAccess": false,
       "eas": {
         "projectId": "60bb4c47-9989-4358-a40f-980e7544cdaf"
       }

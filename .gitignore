@@ -5,9 +5,10 @@ P8/*.p8
 # Claude Code local settings (may contain tokens/keys)
 .claude/settings.local.json
 
-# Local env
+# Local env (real values — never commit)
 .env
 .env.*
+!.env.example
 
 # macOS
 .DS_Store
