@@ -1,0 +1,19 @@
+# Local secrets and private keys
+P8/*.p8
+*.p8
+
+# Claude Code local settings (may contain tokens/keys)
+.claude/settings.local.json
+
+# Local env
+.env
+.env.*
+
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+
+# Expo
+.expo/
