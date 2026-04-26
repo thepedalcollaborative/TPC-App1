@@ -5,11 +5,13 @@ import {
   StyleSheet,
   FlatList,
   TextInput,
+  InputAccessoryView,
   TouchableOpacity,
   Modal,
   ScrollView,
   ActivityIndicator,
   KeyboardAvoidingView,
+  Keyboard,
   Platform,
   Alert,
   Image,
@@ -25,14 +27,20 @@ import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { Session } from '@supabase/supabase-js';
 import { colors, typography, spacing, radius, gradients, boardColorMap } from '../theme';
 import { useStore } from '../hooks/useStore';
 import { supabase, Pedal, UserPedal, PedalColorway, invokeEdgeFunction } from '../lib/supabase';
-import { PedalCard, CategoryBadge, EmptyState } from '../components';
+import { PedalCard, CategoryBadge, EmptyState, SocialShareSheet, FsftShareCard, CollectionShareCard } from '../components';
+import type { CollectionPedal, PriceMode } from '../components';
 import { TabParamList } from '../types/navigation';
 import { reverbAffiliateUrl } from '../lib/reverb';
-import { shareNewPedal } from '../lib/share';
+import { shareGasList, shareNewPedal, shareFsftList, shareCollectionList, shareAsImage, type FsftPedal } from '../lib/share';
 import { hasBetaFullAccess } from '../lib/subscription';
+import { captureRef } from 'react-native-view-shot';
+import * as Sharing from 'expo-sharing';
+import * as FileSystem from 'expo-file-system';
+import * as MediaLibrary from 'expo-media-library';
 
 // Date helpers: DB stores YYYY-MM-DD, UI shows MM-DD-YYYY
 const toDisplayDate = (dbDate: string) => {
@@ -147,19 +155,48 @@ const CATEGORIES = [
   'modeler',
 ];
 
+type PedalSearchLocalResponse = {
+  pedals?: Pedal[];
+};
+
+type SearchListingsResponse = {
+  listings?: Array<{
+    title: string;
+    price: number | null;
+    currency: string | null;
+    condition: string | null;
+    date: string | null;
+    url: string | null;
+    photo_url?: string | null;
+  }>;
+  _debug?: unknown;
+};
+
+type SearchReverbResponse = {
+  results?: ReverbResult[];
+  pedals?: Pedal[];
+  _debug?: unknown;
+};
+
+type SearchUpsertResponse = {
+  pedal?: Pedal;
+};
+
 export default function CollectionScreen() {
+  const targetPriceAccessoryId = 'targetPriceAccessory';
   const insets = useSafeAreaInsets();
   const route = useRoute<RouteProp<TabParamList, 'Vault'>>();
   const navigation = useNavigation<NavigationProp<TabParamList>>();
-  const { session, profile, ownedPedals, wishlistPedals, retiredPedals, totalInvested, totalMarketValue, marketValues, fetchPedals, userImageUrls, userImageThumbUrls, refreshUserImages, viewMode, boards } = useStore();
+  const { session, profile, ownedPedals, wishlistPedals, retiredPedals, listedPedals, totalInvested, totalMarketValue, marketValues, fetchPedals, userImageUrls, userImageThumbUrls, refreshUserImages, viewMode, boards, updateListingStatus } = useStore();
 
-  const [activeTab, setActiveTab] = useState<'owned' | 'wishlist' | 'retired'>('owned');
+  const [activeTab, setActiveTab] = useState<'owned' | 'wishlist' | 'listed'>('owned');
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
 
   // Share nudge — shown briefly after an owned pedal is added
   const [shareNudge, setShareNudge] = useState<{ brand: string; model: string } | null>(null);
+  const [gasListShareOpen, setGasListShareOpen] = useState(false);
   const nudgeOpacity = useRef(new Animated.Value(0)).current;
   const nudgeDismissRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showShareNudge = useCallback((brand: string, model: string) => {
@@ -178,11 +215,26 @@ export default function CollectionScreen() {
   const [acquiredDate, setAcquiredDate] = useState('');
   const [acquiredMethod, setAcquiredMethod] = useState<'purchase' | 'trade'>('purchase');
   const [acquiredPrice, setAcquiredPrice] = useState('');
+  const [targetPrice, setTargetPrice] = useState('');
+  const targetPriceInputRef = useRef<TextInput | null>(null);
   const [acquiredFrom, setAcquiredFrom] = useState('');
   const [acquiredTradeFor, setAcquiredTradeFor] = useState('');
   const [acquiredTradeWith, setAcquiredTradeWith] = useState('');
   const [acquiredNotes, setAcquiredNotes] = useState('');
   const [serialNumber, setSerialNumber] = useState('');
+  const [listingStatus, setListingStatus] = useState<'for_sale' | 'for_trade' | 'for_sale_or_trade' | null>(null);
+  const [askingPrice, setAskingPrice] = useState('');
+  const [tradeWants, setTradeWants] = useState('');
+  const [fsftShareOpen, setFsftShareOpen] = useState(false);
+  const [collectionShareModalOpen, setCollectionShareModalOpen] = useState(false);
+  const [collectionPage, setCollectionPage] = useState(0);
+  // Share config state
+  const [shareConfigOpen, setShareConfigOpen] = useState(false);
+  const [shareSource, setShareSource] = useState<'collection' | 'gas'>('collection');
+  const [shareSelCategories, setShareSelCategories] = useState<string[]>([]);
+  const [sharePriceMode, setSharePriceMode] = useState<PriceMode>('none');
+  const [shareSort, setShareSort] = useState<'newest' | 'oldest' | 'az' | 'value'>('newest');
+  const [shareFsftOnly, setShareFsftOnly] = useState(false);
   const [categoryOverride, setCategoryOverride] = useState<string | null>(null);
   const [retiredDate, setRetiredDate] = useState('');
   const [retiredMethod, setRetiredMethod] = useState<'sale' | 'trade'>('sale');
@@ -192,8 +244,8 @@ export default function CollectionScreen() {
   const [retiredNotes, setRetiredNotes] = useState('');
   const [retiredReason, setRetiredReason] = useState<string | null>(null);
   const [savingDetails, setSavingDetails] = useState(false);
-  const detailScrollRef = useRef<ScrollView>(null);
-  const scrollToField = (fieldRef: React.RefObject<View>) => {
+  const detailScrollRef = useRef<ScrollView | null>(null);
+  const scrollToField = (fieldRef: React.RefObject<View | null>) => {
     setTimeout(() => {
       fieldRef.current?.measureLayout(
         detailScrollRef.current as any,
@@ -202,18 +254,237 @@ export default function CollectionScreen() {
       );
     }, 100);
   };
-  const serialNumberRef = useRef<View>(null);
-  const notesRef = useRef<View>(null);
-  const retiredNotesRef = useRef<View>(null);
+  const serialNumberRef = useRef<View | null>(null);
+  const notesRef = useRef<View | null>(null);
+  const retiredNotesRef = useRef<View | null>(null);
   const [showRetireSection, setShowRetireSection] = useState(false);
   const [retireTradeSearch, setRetireTradeSearch] = useState('');
   const [retireTradeResults, setRetireTradeResults] = useState<Pedal[]>([]);
+
+  const handleShareGasList = useCallback(async () => {
+    const gasPedals = wishlistPedals
+      .filter(p => p.pedal?.brand && p.pedal?.model)
+      .map(p => ({ brand: p.pedal!.brand, model: p.pedal!.model }));
+    if (gasPedals.length === 0) {
+      Alert.alert('No wishlist pedals yet', 'Add a few pedals to your GAS list, then share it.');
+      return;
+    }
+    Haptics.selectionAsync();
+    try {
+      await shareGasList(gasPedals);
+    } catch {
+      // Fallback to social-specific sheet if native share fails on this device.
+      setGasListShareOpen(true);
+    }
+  }, [wishlistPedals]);
+  const handleShareFsftList = useCallback(async () => {
+    const pedals: FsftPedal[] = listedPedals
+      .filter(p => p.pedal?.brand && p.pedal?.model && p.listing_status)
+      .map(p => ({
+        brand: p.pedal!.brand,
+        model: p.pedal!.model,
+        listing_status: p.listing_status!,
+        asking_price: p.asking_price ?? null,
+      }));
+    if (pedals.length === 0) {
+      Alert.alert('Nothing listed yet', 'Mark a pedal as For Sale or For Trade first.');
+      return;
+    }
+    Haptics.selectionAsync();
+    try {
+      // Prefer image card; fall back to text sheet
+      if (fsftCardRef.current) {
+        const uri = await captureRef(fsftCardRef, { format: 'png', quality: 1, result: 'tmpfile' });
+        try {
+          if (await Sharing.isAvailableAsync()) {
+            await Sharing.shareAsync(uri, { mimeType: 'image/png', UTI: 'public.png' });
+            return;
+          }
+        } finally {
+          FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+        }
+      }
+      await shareFsftList(pedals);
+    } catch {
+      setFsftShareOpen(true);
+    }
+  }, [listedPedals]);
+
+  const COLLECTION_PAGE_SIZE = 9;
+
+  // Source pedals for the share config — owned collection OR wishlist (GAS).
+  // listedPedals is already a subset of ownedPedals, so ownedPedals is the sole
+  // source for the collection view to avoid duplicating listed pedals.
+  const collectionAllPedals: CollectionPedal[] = useMemo(() => {
+    const source = shareSource === 'gas' ? wishlistPedals : ownedPedals;
+    return source
+      .filter(p => p.pedal?.brand && p.pedal?.model)
+      .map(p => ({
+        id:            p.id,
+        brand:         p.pedal!.brand,
+        model:         p.pedal!.model,
+        category:      p.category_override ?? p.pedal!.category ?? 'drive',
+        imageUrl:      userImageUrls[p.id] ?? p.colorway?.image_url ?? p.pedal!.image_url ?? null,
+        marketValue:   p.pedal?.id ? (marketValues[p.pedal.id] ?? null) : null,
+        purchasePrice: shareSource === 'gas' ? (p.target_price ?? null) : (p.purchase_price ?? null),
+        askingPrice:   p.asking_price ?? null,
+        listingStatus: p.listing_status ?? null,
+        acquiredDate:  p.acquired_date ?? null,
+      }));
+  }, [shareSource, ownedPedals, wishlistPedals, userImageUrls, marketValues]);
+
+  // Available categories (only cats the user actually has)
+  const availableShareCategories = useMemo(() => {
+    const cats = new Set<string>();
+    collectionAllPedals.forEach(p => { if (p.category) cats.add(p.category); });
+    return Array.from(cats).sort();
+  }, [collectionAllPedals]);
+
+  // Filtered + sorted pedals based on current config
+  const shareFilteredPedals: CollectionPedal[] = useMemo(() => {
+    let pedals = collectionAllPedals;
+    if (shareSelCategories.length > 0) {
+      pedals = pedals.filter(p => shareSelCategories.includes(p.category));
+    }
+    if (shareFsftOnly) {
+      pedals = pedals.filter(p => p.listingStatus != null);
+    }
+    pedals = [...pedals];
+    switch (shareSort) {
+      case 'oldest':
+        pedals.sort((a, b) => (a.acquiredDate ?? '').localeCompare(b.acquiredDate ?? ''));
+        break;
+      case 'az':
+        pedals.sort((a, b) => a.brand.localeCompare(b.brand) || a.model.localeCompare(b.model));
+        break;
+      case 'value':
+        pedals.sort((a, b) => (b.marketValue ?? 0) - (a.marketValue ?? 0));
+        break;
+      default: // 'newest'
+        pedals.sort((a, b) => (b.acquiredDate ?? '').localeCompare(a.acquiredDate ?? ''));
+        break;
+    }
+    return pedals;
+  }, [collectionAllPedals, shareSelCategories, shareFsftOnly, shareSort]);
+
+  // Paginate filtered results
+  const collectionPages: CollectionPedal[][] = useMemo(() => {
+    const pages: CollectionPedal[][] = [];
+    for (let i = 0; i < shareFilteredPedals.length; i += COLLECTION_PAGE_SIZE) {
+      pages.push(shareFilteredPedals.slice(i, i + COLLECTION_PAGE_SIZE));
+    }
+    return pages;
+  }, [shareFilteredPedals]);
+
+  const currentPagePedals  = collectionPages[collectionPage] ?? [];
+  const totalCollectionPages = collectionPages.length;
+
+  // Build a human subtitle for the card header (reflects active filters)
+  const shareCardSubtitle = useMemo(() => {
+    const parts: string[] = [];
+    if (shareSelCategories.length === 1) parts.push(shareSelCategories[0]);
+    else if (shareSelCategories.length > 1) parts.push(`${shareSelCategories.length} categories`);
+    if (shareFsftOnly) parts.push('FS/FT only');
+    const n = shareFilteredPedals.length;
+    parts.push(`${n} pedal${n !== 1 ? 's' : ''}`);
+    return parts.join(' · ');
+  }, [shareSelCategories, shareFsftOnly, shareFilteredPedals.length]);
+
+  const _doShareCollectionCard = useCallback(async (pageIndex: number, pagePedals: CollectionPedal[]) => {
+    const viewNode = pageRefs.current[pageIndex];
+    let uri: string | null = null;
+    try {
+      if (viewNode) {
+        await new Promise(resolve => setTimeout(resolve, 800));
+        uri = await captureRef({ current: viewNode }, { format: 'png', quality: 1, result: 'tmpfile' });
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(uri, { mimeType: 'image/png', UTI: 'public.png' });
+          return;
+        }
+      }
+      await shareCollectionList(pagePedals.map(p => ({ brand: p.brand, model: p.model })), profile?.display_name ?? undefined);
+    } catch {
+      await shareCollectionList(pagePedals.map(p => ({ brand: p.brand, model: p.model })), profile?.display_name ?? undefined);
+    } finally {
+      if (uri) FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+    }
+  }, [profile?.display_name]);
+
+  // Open the config sheet for the owned collection
+  const handleShareCollection = useCallback(() => {
+    setShareSource('collection');
+    if (ownedPedals.filter(p => p.pedal?.brand && p.pedal?.model).length === 0) return;
+    Haptics.selectionAsync();
+    setCollectionPage(0);
+    setShareFsftOnly(false);
+    setShareConfigOpen(true);
+  }, [ownedPedals]);
+
+  // Open the config sheet for the GAS wishlist
+  const handleShareGasCard = useCallback(() => {
+    setShareSource('gas');
+    if (wishlistPedals.filter(p => p.pedal?.brand && p.pedal?.model).length === 0) return;
+    Haptics.selectionAsync();
+    setCollectionPage(0);
+    setShareFsftOnly(false);
+    setShareSelCategories([]);
+    setSharePriceMode('none');
+    setShareSort('newest');
+    setShareConfigOpen(true);
+  }, [wishlistPedals]);
+
+  // Share the current page with current config
+  const handleShareCurrentPage = useCallback(async () => {
+    Haptics.selectionAsync();
+    setShareConfigOpen(false);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await _doShareCollectionCard(collectionPage, currentPagePedals);
+  }, [collectionPage, currentPagePedals, _doShareCollectionCard]);
+
+  // Save every page as an image to the camera roll
+  const handleSaveAllPages = useCallback(async () => {
+    const { status } = await MediaLibrary.requestPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', 'Please allow Photos access to save your collection images.');
+      return;
+    }
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setSavingAllPages(true);
+    setShareConfigOpen(false);
+    try {
+      // Wait for all off-screen images to finish loading
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      const saved: string[] = [];
+      for (let i = 0; i < collectionPages.length; i++) {
+        const viewNode = pageRefs.current[i];
+        if (!viewNode) continue;
+        const uri = await captureRef({ current: viewNode }, { format: 'png', quality: 1, result: 'tmpfile' });
+        await MediaLibrary.saveToLibraryAsync(uri);
+        saved.push(uri);
+        // Clean up temp file after saving to camera roll
+        FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+      }
+      Alert.alert(
+        'Saved to Photos',
+        `${saved.length} image${saved.length !== 1 ? 's' : ''} saved to your camera roll.`,
+      );
+    } catch (e) {
+      Alert.alert('Something went wrong', 'Could not save images. Try again.');
+    } finally {
+      setSavingAllPages(false);
+    }
+  }, [collectionPages]);
+
   const [retireTradeSearching, setRetireTradeSearching] = useState(false);
   const [retireNewPedal, setRetireNewPedal] = useState<Pedal | null>(null);
   const [retireNewColorways, setRetireNewColorways] = useState<PedalColorway[]>([]);
   const [retireNewColorwayId, setRetireNewColorwayId] = useState<string | null>(null);
   const [retireCashPaid, setRetireCashPaid] = useState('');
   const retireTradeDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fsftCardRef = useRef<View>(null);
+  // One ref per page — all cards mounted simultaneously so images pre-load in parallel
+  const pageRefs = useRef<(View | null)[]>([]);
+  const [savingAllPages, setSavingAllPages] = useState(false);
   const [pedalChain, setPedalChain] = useState<UserPedal[]>([]);
   const [chainLoading, setChainLoading] = useState(false);
   const [detailUserImageUrl, setDetailUserImageUrl] = useState<string | null>(null);
@@ -256,7 +527,7 @@ export default function CollectionScreen() {
   }, [route.params?.openAddModal, navigation]);
 
   // Filtered list
-  const rawList = activeTab === 'owned' ? ownedPedals : activeTab === 'wishlist' ? wishlistPedals : retiredPedals;
+  const rawList = activeTab === 'owned' ? ownedPedals : activeTab === 'wishlist' ? wishlistPedals : listedPedals;
   const filtered = rawList.filter(p => {
     const pedal = p.pedal;
     if (!pedal) return false;
@@ -295,7 +566,7 @@ export default function CollectionScreen() {
     return null;
   }, [boards, detailPedal]);
 
-  const handleTabPress = (tab: 'owned' | 'wishlist' | 'retired') => {
+  const handleTabPress = (tab: 'owned' | 'wishlist' | 'listed') => {
     Haptics.selectionAsync();
     setActiveTab(tab);
     setSearchQuery('');
@@ -327,6 +598,10 @@ export default function CollectionScreen() {
     setAcquiredTradeWith(item.acquired_trade_with ?? '');
     setAcquiredNotes(item.notes ?? '');
     setSerialNumber(item.serial_number ?? '');
+    setListingStatus(item.listing_status ?? null);
+    setAskingPrice(item.asking_price != null ? String(item.asking_price) : '');
+    setTradeWants(item.trade_wants ?? '');
+    setTargetPrice((item as unknown as Record<string, unknown>).target_price != null ? String((item as unknown as Record<string, unknown>).target_price) : '');
     setRetiredDate(item.retired_date ? toDisplayDate(item.retired_date) : '');
     setRetiredMethod(
       item.retired_method ??
@@ -361,7 +636,7 @@ export default function CollectionScreen() {
     retireTradeDebounce.current = setTimeout(async () => {
       setRetireTradeSearching(true);
       try {
-        const { data } = await invokeEdgeFunction('search-pedals', { query: query.trim(), localOnly: true });
+        const { data } = await invokeEdgeFunction<PedalSearchLocalResponse>('search-pedals', { query: query.trim(), localOnly: true });
         setRetireTradeResults((data?.pedals as Pedal[]) ?? []);
       } catch { setRetireTradeResults([]); }
       setRetireTradeSearching(false);
@@ -407,6 +682,8 @@ export default function CollectionScreen() {
     setShowDetailModal(false);
     setDetailPedal(null);
     setRetiredReason(null);
+    setListingStatus(null);
+    setAskingPrice('');
     navigation.setParams({ openPedalId: undefined });
   };
 
@@ -417,20 +694,20 @@ export default function CollectionScreen() {
     setWishlistError(null);
     try {
       const primaryQuery = `${pedal.brand} ${pedal.model}`.trim();
-      const { data, error } = await invokeEdgeFunction('search-pedals', {
+      const { data, error } = await invokeEdgeFunction<SearchListingsResponse>('search-pedals', {
         action: 'listings',
         query: primaryQuery,
         sort,
       });
       if (error) throw error;
-      let listings = (data?.listings as Array<{ title: string; price: number | null; currency: string | null; condition: string | null; date: string | null; url: string | null; photo_url?: string | null }>) ?? [];
+      let listings = data?.listings ?? [];
       if (__DEV__ && (data as { _debug?: unknown } | null)?._debug) {
         console.warn('[Wishlist listings] debug:', (data as { _debug?: unknown })._debug);
       }
       // Fallback query when exact brand+model yields no results
       if (listings.length === 0) {
         const fallbackQuery = `${pedal.model}`.trim();
-        const { data: fallbackData, error: fallbackErr } = await invokeEdgeFunction('search-pedals', {
+        const { data: fallbackData, error: fallbackErr } = await invokeEdgeFunction<SearchListingsResponse>('search-pedals', {
           action: 'listings',
           query: fallbackQuery,
           sort,
@@ -439,7 +716,7 @@ export default function CollectionScreen() {
           console.warn('[Wishlist listings] fallback debug:', (fallbackData as { _debug?: unknown })._debug);
         }
         if (!fallbackErr) {
-          listings = (fallbackData?.listings as Array<{ title: string; price: number | null; currency: string | null; condition: string | null; date: string | null; url: string | null; photo_url?: string | null }>) ?? [];
+          listings = fallbackData?.listings ?? [];
         }
       }
       setWishlistListings(listings);
@@ -453,12 +730,21 @@ export default function CollectionScreen() {
         }
       }
 
-      // Fallback photo source for wishlist pedals lacking an image_url
-      const firstListingPhoto = listings.find(l => l.photo_url)?.photo_url ?? null;
-      if (!item.user_image_path && !pedal.image_url && firstListingPhoto) {
-        setDetailUserImageUrl(firstListingPhoto);
-        await supabase.from('pedals').update({ image_url: firstListingPhoto }).eq('id', pedal.id);
-        fetchPedals();
+      // If this pedal has no image at all, kick off a quality-scored image fetch
+      // in the background — uses pedal-image edge function which prefers official
+      // brand shop photos over random user listing photos.
+      if (!item.user_image_path && !pedal.image_url) {
+        invokeEdgeFunction('pedal-image', {
+          pedal_id: pedal.id,
+          brand:    pedal.brand,
+          model:    pedal.model,
+        }).then(({ data }) => {
+          const url = (data as { image_url?: string | null })?.image_url;
+          if (url) {
+            setDetailUserImageUrl(url);
+            fetchPedals();
+          }
+        }).catch(() => {});
       }
     } catch (e) {
       const maybeErr = e as { message?: string; context?: { status?: number; text?: () => Promise<string> } };
@@ -494,6 +780,19 @@ export default function CollectionScreen() {
       serial_number: serialNumber.trim() || null,
       colorway_id: detailColorwayId ?? null,
       category_override: categoryOverride ?? null,
+      // target_price only persisted for wishlist items
+      ...(detailPedal.status === 'wishlist' && {
+        target_price: parsePrice(targetPrice),
+      }),
+      // listing status — only for owned pedals, cleared on retire
+      ...(detailPedal.status === 'owned' && !showRetireSection && {
+        listing_status: listingStatus,
+        asking_price: (listingStatus === 'for_sale' || listingStatus === 'for_sale_or_trade') ? parsePrice(askingPrice) : null,
+      }),
+      ...(showRetireSection && {
+        listing_status: null,
+        asking_price: null,
+      }),
     };
 
     const retiredDateDb = retiredDate.trim() ? toDbDate(retiredDate.trim()) : today;
@@ -532,7 +831,6 @@ export default function CollectionScreen() {
     }
 
     // If retiring via trade and user selected the new pedal, insert it now
-    if (__DEV__) console.warn('[saveDetail] retire check:', { showRetireSection, retiredMethod, retireNewPedal: retireNewPedal?.model, hasSession: !!session?.user });
     if (showRetireSection && retiredMethod === 'trade' && retireNewPedal && session?.user) {
       const cashNum = retireCashPaid.trim() ? parseFloat(retireCashPaid.replace(/[^0-9.-]/g, '')) : null;
       const { error: insertError } = await supabase.from('user_pedals').insert({
@@ -587,7 +885,7 @@ export default function CollectionScreen() {
           quality: 0.85,
         })
       : await ImagePicker.launchImageLibraryAsync({
-          mediaTypes: ImagePicker.MediaType.Images,
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
           allowsEditing: true,
           quality: 0.85,
         });
@@ -595,7 +893,7 @@ export default function CollectionScreen() {
     setUploadingPhoto(true);
     try {
       const asset = result.assets[0];
-      const basePath = `user_pedals/${session.user.id}/${detailPedal.id}/${Date.now()}`;
+      const basePath = `${session.user.id}/pedals/${detailPedal.id}/${Date.now()}`;
       const path = `${basePath}.jpg`;
       const thumbPath = `${basePath}_sm.jpg`;
       const [fullAsset, thumbAsset] = await Promise.all([
@@ -711,7 +1009,7 @@ export default function CollectionScreen() {
 
   const handleWishlistLongPress = (item: UserPedal) => {
     if (item.status !== 'wishlist') return;
-    Alert.alert('Remove from wishlist?', 'This will remove it from your wishlist.', [
+    Alert.alert('Remove from GAS list?', 'This will remove it from your GAS list.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Remove',
@@ -751,46 +1049,105 @@ export default function CollectionScreen() {
     ]);
   };
 
+  // ── Unretire — move a previously retired pedal back to owned ─────────────────
+  const handleUnretirePedal = async (item: UserPedal) => {
+    if (!session?.user?.id) {
+      Alert.alert('Session expired', 'Please sign in again.');
+      return;
+    }
+    const { error } = await supabase
+      .from('user_pedals')
+      .update({
+        status: 'owned',
+        retired_date: null,
+        retired_method: null,
+        retired_price: null,
+        retired_trade_for: null,
+        retired_to: null,
+        retired_notes: null,
+        listing_status: null,
+        asking_price: null,
+      })
+      .eq('id', item.id)
+      .eq('user_id', session.user.id);
+
+    if (error) {
+      Alert.alert('Unretire failed', error.message);
+      return;
+    }
+
+    const restored: UserPedal = {
+      ...item,
+      status: 'owned',
+      retired_date: null,
+      retired_method: null,
+      retired_price: null,
+      retired_trade_for: null,
+      retired_to: null,
+      retired_notes: null,
+      listing_status: null,
+      asking_price: null,
+    };
+
+    useStore.setState((s) => ({
+      retiredPedals: s.retiredPedals.filter((p) => p.id !== item.id),
+      ownedPedals: [restored, ...s.ownedPedals],
+    }));
+
+    // Close detail panel if this pedal was open in it
+    if (detailPedal?.id === item.id) closeDetail();
+
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  };
+
   const handleRetiredLongPress = (item: UserPedal) => {
     if (item.status !== 'retired') return;
-    Alert.alert('Delete retired pedal?', 'This will remove it from your collection history.', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            if (!session?.user?.id) {
-              Alert.alert('Session expired', 'Please sign in again.');
-              return;
-            }
-            const { error, data: deleted } = await supabase
-              .from('user_pedals')
-              .delete()
-              .eq('id', item.id)
-              .eq('user_id', session.user.id)
-              .select('id');
-            if (error) {
-              Alert.alert('Delete failed', error.message);
-              return;
-            }
-            if (!deleted?.length) {
-              Alert.alert('Delete failed', 'Could not confirm deletion for this account.');
-              return;
-            }
-            useStore.setState((s) => ({
-              retiredPedals: s.retiredPedals.filter((p) => p.id !== item.id),
-              ownedPedals: s.ownedPedals.filter((p) => p.id !== item.id),
-              wishlistPedals: s.wishlistPedals.filter((p) => p.id !== item.id),
-            }));
-            fetchPedals();
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            Alert.alert('Delete failed', msg);
-          }
+    Alert.alert(
+      item.pedal ? `${item.pedal.brand} ${item.pedal.model}` : 'Retired pedal',
+      'What would you like to do?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Got it back — move to Owned',
+          onPress: () => handleUnretirePedal(item),
         },
-      },
-    ]);
+        {
+          text: 'Delete from history',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              if (!session?.user?.id) {
+                Alert.alert('Session expired', 'Please sign in again.');
+                return;
+              }
+              const { error, data: deleted } = await supabase
+                .from('user_pedals')
+                .delete()
+                .eq('id', item.id)
+                .eq('user_id', session.user.id)
+                .select('id');
+              if (error) {
+                Alert.alert('Delete failed', error.message);
+                return;
+              }
+              if (!deleted?.length) {
+                Alert.alert('Delete failed', 'Could not confirm deletion for this account.');
+                return;
+              }
+              useStore.setState((s) => ({
+                retiredPedals: s.retiredPedals.filter((p) => p.id !== item.id),
+                ownedPedals: s.ownedPedals.filter((p) => p.id !== item.id),
+                wishlistPedals: s.wishlistPedals.filter((p) => p.id !== item.id),
+              }));
+              fetchPedals();
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              Alert.alert('Delete failed', msg);
+            }
+          },
+        },
+      ]
+    );
   };
 
 
@@ -840,13 +1197,17 @@ export default function CollectionScreen() {
           )}
         </View>
 
-        {/* Owned / Wishlist / Previous tabs */}
+        {/* Owned / GAS / FS/FT tabs */}
         <View style={styles.tabs}>
-          {(['owned', 'wishlist', 'retired'] as const).map(tab => {
-            const label = tab === 'owned' ? 'Owned' : tab === 'wishlist' ? 'Wishlist' : 'Previous';
-            const icon: keyof typeof Ionicons.glyphMap = tab === 'owned' ? 'cube-outline' : tab === 'wishlist' ? 'bookmark-outline' : 'archive-outline';
-            const count = tab === 'owned' ? ownedPedals.length : tab === 'wishlist' ? wishlistPedals.length : retiredPedals.length;
+          {(['owned', 'wishlist', 'listed'] as const).map(tab => {
+            const label = tab === 'owned' ? 'Owned' : tab === 'wishlist' ? 'GAS' : 'FS/FT';
+            const icon: keyof typeof Ionicons.glyphMap = tab === 'owned' ? 'cube-outline' : tab === 'wishlist' ? 'flame-outline' : 'pricetag-outline';
+            const count = tab === 'owned' ? ownedPedals.length : tab === 'wishlist' ? wishlistPedals.length : listedPedals.length;
             const isActive = activeTab === tab;
+            const gradColors: [string, string] =
+              tab === 'wishlist' ? [colors.rose, colors.roseDark] :
+              tab === 'listed'   ? [colors.gold, colors.goldDark] :
+              [gradients.teal[0], gradients.teal[1]];
             return (
               <TouchableOpacity
                 key={tab}
@@ -855,16 +1216,20 @@ export default function CollectionScreen() {
                 activeOpacity={0.75}
               >
                 {isActive ? (
-                  <LinearGradient
-                    colors={tab === 'retired' ? ['#5E7585', '#3D5261'] : gradients.teal}
-                    style={styles.tabGradient}
-                  >
-                    <Ionicons name={icon} size={13} color="#fff" />
-                    <Text style={styles.tabTextActive}>{label}</Text>
-                    <View style={styles.tabBadge}>
-                      <Text style={styles.tabBadgeText}>{count}</Text>
+                  <>
+                    <LinearGradient
+                      colors={gradColors}
+                      style={StyleSheet.absoluteFillObject}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 0 }}
+                    />
+                    <View style={styles.tabGradientContent}>
+                      <Text style={styles.tabTextActive}>{label}</Text>
+                      <View style={styles.tabBadge}>
+                        <Text style={styles.tabBadgeText}>{count}</Text>
+                      </View>
                     </View>
-                  </LinearGradient>
+                  </>
                 ) : (
                   <View style={styles.tabInner}>
                     <Ionicons name={icon} size={13} color={colors.textMuted} />
@@ -883,7 +1248,7 @@ export default function CollectionScreen() {
             style={styles.searchInput}
             value={searchQuery}
             onChangeText={setSearchQuery}
-            placeholder={`Search ${activeTab === 'owned' ? 'owned' : 'wishlist'} pedals...`}
+            placeholder={activeTab === 'owned' ? 'Search owned pedals...' : activeTab === 'wishlist' ? 'Search GAS list...' : 'Search FS/FT listings...'}
             placeholderTextColor={colors.textMuted}
             returnKeyType="search"
           />
@@ -934,34 +1299,142 @@ export default function CollectionScreen() {
         />
         <View style={styles.actionBar}>
           <TouchableOpacity
-            style={styles.actionHalf}
+            style={styles.actionFull}
             activeOpacity={0.85}
             onPress={() => {
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
               setShowAddModal(true);
             }}
           >
-            <LinearGradient colors={gradients.teal} style={styles.actionHalfCard}>
+            <LinearGradient
+              colors={
+                activeTab === 'wishlist' ? [colors.rose, colors.roseDark] :
+                activeTab === 'listed'   ? [colors.gold, colors.goldDark] :
+                gradients.teal
+              }
+              style={styles.actionFullCard}
+            >
               <Ionicons name="add-circle" size={20} color="#fff" />
               <Text style={styles.actionHalfTitle}>Add a Pedal</Text>
             </LinearGradient>
           </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.actionHalf}
-            activeOpacity={0.85}
-            onPress={() => {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-              navigation.navigate('Finder' as never);
-            }}
-          >
-            <LinearGradient colors={[colors.teal + '28', colors.teal + '10']} style={styles.actionHalfCardLight}>
-              <Ionicons name="search" size={20} color={colors.teal} />
-              <Text style={styles.actionHalfTitleDark}>Find Your Pedal</Text>
-            </LinearGradient>
-          </TouchableOpacity>
         </View>
       </View>
+
+      {/* ── Share strip — collection (owned tab) ── */}
+      {activeTab === 'owned' && collectionAllPedals.length > 0 && (
+        <TouchableOpacity
+          style={styles.shareCollectionRow}
+          activeOpacity={0.75}
+          onPress={handleShareCollection}
+        >
+          <Ionicons name="share-outline" size={15} color={colors.teal} />
+          <Text style={styles.shareCollectionText}>Share My Collection</Text>
+          <Text style={styles.shareGasListCount}>({collectionAllPedals.length})</Text>
+          <Ionicons name="chevron-forward" size={13} color={colors.teal + '80'} style={{ marginLeft: 'auto' }} />
+        </TouchableOpacity>
+      )}
+
+      {/* ── Share GAS List strip — visible only when wishlist tab has items ── */}
+      {activeTab === 'wishlist' && wishlistPedals.length > 0 && (
+        <TouchableOpacity
+          style={[styles.shareCollectionRow, { backgroundColor: colors.rose + '0F', borderColor: colors.rose + '28' }]}
+          activeOpacity={0.75}
+          onPress={handleShareGasCard}
+          onLongPress={() => setGasListShareOpen(true)}
+        >
+          <Ionicons name="share-outline" size={15} color={colors.rose} />
+          <Text style={[styles.shareCollectionText, { color: colors.rose }]}>Share My GAS List</Text>
+          <Text style={styles.shareGasListCount}>({wishlistPedals.length})</Text>
+          <Ionicons name="chevron-forward" size={13} color={colors.rose + '80'} style={{ marginLeft: 'auto' }} />
+        </TouchableOpacity>
+      )}
+
+      {/* ── Share strip — FS/FT tab (opens config pre-filtered to FS/FT only) ── */}
+      {activeTab === 'listed' && listedPedals.length > 0 && (
+        <TouchableOpacity
+          style={[styles.shareCollectionRow, { backgroundColor: colors.gold + '18', borderColor: colors.gold + '40' }]}
+          activeOpacity={0.75}
+          onPress={() => {
+            Haptics.selectionAsync();
+            setShareFsftOnly(true);
+            setSharePriceMode('asking');
+            setShareSelCategories([]);
+            setShareSort('newest');
+            setCollectionPage(0);
+            setShareConfigOpen(true);
+          }}
+        >
+          <Ionicons name="share-outline" size={15} color={colors.goldDark} />
+          <Text style={[styles.shareCollectionText, { color: colors.goldDark }]}>Share My FS/FT List</Text>
+          <Text style={[styles.shareGasListCount, { color: colors.gold + 'AA' }]}>({listedPedals.length})</Text>
+          <Ionicons name="chevron-forward" size={13} color={colors.gold + '80'} style={{ marginLeft: 'auto' }} />
+        </TouchableOpacity>
+      )}
+      {(() => {
+        const gasPedals = wishlistPedals
+          .filter(p => p.pedal?.brand && p.pedal?.model)
+          .map(p => ({ brand: p.pedal!.brand, model: p.pedal!.model }));
+        const shown = gasPedals.slice(0, 8).map(p => `• ${p.brand} ${p.model}`);
+        if (gasPedals.length > 8) shown.push(`+${gasPedals.length - 8} more`);
+        const gasListText = [
+          'My GAS List 🔥',
+          '',
+          ...shown,
+          '',
+          `${gasPedals.length} pedal${gasPedals.length !== 1 ? 's' : ''} on my radar. Track yours on TPC — https://thepedalcollaborative.com`,
+          '',
+          '#guitarpedals #GAS #pedalNGD #tonehunter',
+        ].join('\n');
+        return (
+          <SocialShareSheet
+            visible={gasListShareOpen}
+            onClose={() => setGasListShareOpen(false)}
+            text={gasListText}
+            xText={`${gasPedals.length} pedals on my GAS list 🔥 #guitarpedals #GAS`}
+          />
+        );
+      })()}
+      {(() => {
+        const fsftPedals: FsftPedal[] = listedPedals
+          .filter(p => p.pedal?.brand && p.pedal?.model && p.listing_status)
+          .map(p => ({
+            brand: p.pedal!.brand,
+            model: p.pedal!.model,
+            listing_status: p.listing_status!,
+            asking_price: p.asking_price ?? null,
+          }));
+        const lines: string[] = [];
+        for (const p of fsftPedals.slice(0, 10)) {
+          let line = `• ${p.brand} ${p.model}`;
+          if (p.listing_status === 'for_sale' || p.listing_status === 'for_sale_or_trade') {
+            line += p.asking_price != null ? ` — $${p.asking_price}` : ' — FS';
+          }
+          if (p.listing_status === 'for_trade' || p.listing_status === 'for_sale_or_trade') {
+            line += ' — FT';
+          }
+          lines.push(line);
+        }
+        if (fsftPedals.length > 10) lines.push(`+${fsftPedals.length - 10} more`);
+        const hasFS = fsftPedals.some(p => p.listing_status !== 'for_trade');
+        const hasFT = fsftPedals.some(p => p.listing_status !== 'for_sale');
+        const headline = hasFS && hasFT ? 'Pedals For Sale & Trade 🎸' : hasFS ? 'Pedals For Sale 💰' : 'Pedals For Trade 🔄';
+        const fsftText = [
+          headline, '',
+          ...lines, '',
+          `${fsftPedals.length} pedal${fsftPedals.length !== 1 ? 's' : ''} available. DMs open — tracked on TPC — https://thepedalcollaborative.com`,
+          '',
+          '#guitarpedals #pedalboard #FS #FT #geartrade',
+        ].join('\n');
+        return (
+          <SocialShareSheet
+            visible={fsftShareOpen}
+            onClose={() => setFsftShareOpen(false)}
+            text={fsftText}
+            xText={`${fsftPedals.length} pedal${fsftPedals.length !== 1 ? 's' : ''} FS/FT — DMs open 🎸 #guitarpedals #geartrade`}
+          />
+        );
+      })()}
 
       {/* ── List ── */}
       <FlatList
@@ -989,15 +1462,15 @@ export default function CollectionScreen() {
         )}
         ListEmptyComponent={
           <EmptyState
-            emoji={activeTab === 'owned' ? '🎸' : activeTab === 'wishlist' ? '❤️' : '📦'}
+            icon={activeTab === 'owned' ? 'cube-outline' : activeTab === 'wishlist' ? 'flame-outline' : 'pricetag-outline'}
             title={
               searchQuery || activeCategory
                 ? 'No matches found'
                 : activeTab === 'owned'
                 ? 'No pedals owned yet'
                 : activeTab === 'wishlist'
-                ? 'Wishlist is empty'
-                : 'No previous pedals'
+                ? 'GAS list is empty'
+                : 'Nothing listed yet'
             }
             subtitle={
               searchQuery || activeCategory
@@ -1006,9 +1479,9 @@ export default function CollectionScreen() {
                 ? 'Tap + to add your first pedal'
                 : activeTab === 'wishlist'
                 ? 'Tap + to start building your dream list'
-                : 'Pedals you no longer own will appear here'
+                : 'Open a pedal you own and mark it For Sale or For Trade'
             }
-            action={!searchQuery && !activeCategory && activeTab !== 'retired' ? 'Add Pedal' : undefined}
+            action={!searchQuery && !activeCategory && activeTab !== 'listed' ? 'Add Pedal' : undefined}
             onAction={() => setShowAddModal(true)}
           />
         }
@@ -1047,7 +1520,7 @@ export default function CollectionScreen() {
               <Text style={styles.modalTitle}>
                 {detailPedal?.pedal ? `${detailPedal.pedal.brand} ${detailPedal.pedal.model}` : 'Edit Pedal'}
               </Text>
-              <TouchableOpacity onPress={closeDetail} activeOpacity={0.7} style={{ padding: spacing.xs, marginRight: spacing.xs }}>
+              <TouchableOpacity onPress={closeDetail} activeOpacity={0.7} style={{ padding: spacing.sm }}>
                 <Ionicons name="close" size={20} color={colors.textMuted} />
               </TouchableOpacity>
             </View>
@@ -1064,6 +1537,45 @@ export default function CollectionScreen() {
               <>
                   {detailPedal?.status === 'wishlist' ? (
                     <>
+                      {/* ── Price alert target ── */}
+                      <View style={styles.targetPriceRow}>
+                        <View style={styles.targetPriceLeft}>
+                          <Ionicons name="notifications-outline" size={14} color={colors.teal} />
+                          <Text style={styles.targetPriceLabel}>Alert me when below</Text>
+                        </View>
+                        <View style={styles.targetPriceInputWrap}>
+                          <Text style={styles.targetPriceCurrency}>$</Text>
+                          <TextInput
+                            ref={targetPriceInputRef}
+                            style={styles.targetPriceInput}
+                            placeholder="—"
+                            placeholderTextColor={colors.textMuted}
+                            keyboardType="decimal-pad"
+                            returnKeyType="done"
+                            value={targetPrice}
+                            onChangeText={setTargetPrice}
+                            inputAccessoryViewID={Platform.OS === 'ios' ? targetPriceAccessoryId : undefined}
+                            maxLength={7}
+                          />
+                        </View>
+                      </View>
+                      {Platform.OS === 'ios' && (
+                        <InputAccessoryView nativeID={targetPriceAccessoryId}>
+                          <View style={styles.keyboardAccessory}>
+                            <TouchableOpacity
+                              onPress={() => {
+                                targetPriceInputRef.current?.blur();
+                                Keyboard.dismiss();
+                              }}
+                              activeOpacity={0.75}
+                              style={styles.keyboardAccessoryButton}
+                            >
+                              <Text style={styles.keyboardAccessoryButtonText}>Save</Text>
+                            </TouchableOpacity>
+                          </View>
+                        </InputAccessoryView>
+                      )}
+
                       <View style={styles.wishlistHeaderRow}>
                         <Text style={styles.sectionLabel}>Reverb Listings</Text>
                         <View style={styles.sortRow}>
@@ -1123,6 +1635,79 @@ export default function CollectionScreen() {
                     </>
                   ) : (
                     <>
+                      {/* ── Gear Journey Card (retired pedals only) ── */}
+                      {detailPedal?.status === 'retired' && (() => {
+                        const paid = detailPedal.purchase_price;
+                        const sold = detailPedal.retired_price;
+                        const net = (paid != null && sold != null) ? sold - paid : null;
+                        const fromDate = detailPedal.acquired_date;
+                        const toDate = detailPedal.retired_date;
+                        const tenure = (() => {
+                          if (!fromDate) return null;
+                          const from = new Date(fromDate);
+                          const to = toDate ? new Date(toDate) : new Date();
+                          const months = (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
+                          if (months < 1) return 'Less than a month';
+                          if (months < 12) return `${months} month${months !== 1 ? 's' : ''}`;
+                          const years = Math.floor(months / 12);
+                          const rem = months % 12;
+                          return rem > 0 ? `${years}y ${rem}mo` : `${years} year${years !== 1 ? 's' : ''}`;
+                        })();
+                        const methodLabel = detailPedal.retired_method === 'sale'
+                          ? detailPedal.retired_to ? `Sold to ${detailPedal.retired_to}` : 'Sold'
+                          : detailPedal.retired_to ? `Traded with ${detailPedal.retired_to}` : detailPedal.retired_method === 'trade' ? 'Traded' : null;
+                        return (
+                          <View style={styles.gearJourneyCard}>
+                            {tenure && (
+                              <View style={styles.gearJourneyRow}>
+                                <Ionicons name="time-outline" size={14} color={colors.textMuted} />
+                                <Text style={styles.gearJourneyMeta}>
+                                  Owned for <Text style={styles.gearJourneyValue}>{tenure}</Text>
+                                </Text>
+                              </View>
+                            )}
+                            {methodLabel && (
+                              <View style={styles.gearJourneyRow}>
+                                <Ionicons name="swap-horizontal-outline" size={14} color={colors.textMuted} />
+                                <Text style={styles.gearJourneyMeta}>{methodLabel}</Text>
+                              </View>
+                            )}
+                            {(paid != null || sold != null) && (
+                              <View style={styles.gearJourneyPL}>
+                                {paid != null && (
+                                  <View style={styles.gearJourneyPLItem}>
+                                    <Text style={styles.gearJourneyPLLabel}>Paid</Text>
+                                    <Text style={styles.gearJourneyPLAmount}>${paid.toLocaleString()}</Text>
+                                  </View>
+                                )}
+                                {paid != null && sold != null && (
+                                  <Ionicons name="arrow-forward" size={13} color={colors.textMuted} />
+                                )}
+                                {sold != null && (
+                                  <View style={styles.gearJourneyPLItem}>
+                                    <Text style={styles.gearJourneyPLLabel}>
+                                      {detailPedal.retired_method === 'trade' ? 'Traded for' : 'Sold for'}
+                                    </Text>
+                                    <Text style={styles.gearJourneyPLAmount}>${sold.toLocaleString()}</Text>
+                                  </View>
+                                )}
+                                {net !== null && (
+                                  <View style={[styles.gearJourneyNetBadge, {
+                                    backgroundColor: net >= 0 ? colors.teal + '20' : colors.rose + '20',
+                                  }]}>
+                                    <Text style={[styles.gearJourneyNetText, {
+                                      color: net >= 0 ? colors.teal : colors.rose,
+                                    }]}>
+                                      {net >= 0 ? '+' : ''}${net.toLocaleString()}
+                                    </Text>
+                                  </View>
+                                )}
+                              </View>
+                            )}
+                          </View>
+                        );
+                      })()}
+
                       <View style={styles.detailImageRow}>
                 {detailUserImageUrl && !detailImageFailed ? (
                   <Image
@@ -1138,36 +1723,38 @@ export default function CollectionScreen() {
                     <Text style={styles.detailImageFallbackText}>No photo</Text>
                   </View>
                 )}
-                  <TouchableOpacity
-                    style={styles.detailPhotoBtn}
-                    onPress={() => handlePickPhoto(true)}
-                    activeOpacity={0.8}
-                    disabled={uploadingPhoto}
-                  >
-                  {uploadingPhoto ? (
-                    <ActivityIndicator color={colors.teal} />
-                  ) : (
-                    <>
-                      <Ionicons name="camera-outline" size={18} color={colors.teal} />
-                      <Text style={styles.detailPhotoBtnText}>Take Photo</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.detailPhotoBtn}
-                  onPress={() => handlePickPhoto(false)}
-                  activeOpacity={0.8}
-                  disabled={uploadingPhoto}
-                >
-                  {uploadingPhoto ? (
-                    <ActivityIndicator color={colors.teal} />
-                  ) : (
-                    <>
-                      <Ionicons name="images-outline" size={18} color={colors.teal} />
-                      <Text style={styles.detailPhotoBtnText}>Choose Photo</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
+                  <View style={{ flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs }}>
+                    <TouchableOpacity
+                      style={styles.detailPhotoBtn}
+                      onPress={() => handlePickPhoto(true)}
+                      activeOpacity={0.8}
+                      disabled={uploadingPhoto}
+                    >
+                      {uploadingPhoto ? (
+                        <ActivityIndicator color={colors.teal} />
+                      ) : (
+                        <>
+                          <Ionicons name="camera-outline" size={18} color={colors.teal} />
+                          <Text style={styles.detailPhotoBtnText}>Take Photo</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.detailPhotoBtn}
+                      onPress={() => handlePickPhoto(false)}
+                      activeOpacity={0.8}
+                      disabled={uploadingPhoto}
+                    >
+                      {uploadingPhoto ? (
+                        <ActivityIndicator color={colors.teal} />
+                      ) : (
+                        <>
+                          <Ionicons name="images-outline" size={18} color={colors.teal} />
+                          <Text style={styles.detailPhotoBtnText}>Choose Photo</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  </View>
               </View>
 
               {detailPedal?.status === 'owned' && (
@@ -1185,6 +1772,35 @@ export default function CollectionScreen() {
                     </Text>
                   </View>
                 </View>
+              )}
+
+              {detailPedal?.status === 'owned' && !showRetireSection && (
+                <>
+                  <Text style={styles.sectionLabel}>For Sale / For Trade</Text>
+                  <View style={styles.segmentedRow}>
+                    {([null, 'for_sale', 'for_trade', 'for_sale_or_trade'] as const).map(opt => (
+                      <TouchableOpacity
+                        key={String(opt)}
+                        style={[styles.segmentedButton, listingStatus === opt && styles.segmentedButtonActive]}
+                        onPress={() => { Haptics.selectionAsync(); setListingStatus(opt); }}
+                      >
+                        <Text style={[styles.segmentedText, listingStatus === opt && styles.segmentedTextActive]}>
+                          {opt === null ? 'Not Listed' : opt === 'for_sale' ? 'For Sale' : opt === 'for_trade' ? 'For Trade' : 'FS+FT'}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  {(listingStatus === 'for_sale' || listingStatus === 'for_sale_or_trade') && (
+                    <TextInput
+                      style={styles.detailInput}
+                      placeholder="Asking price"
+                      keyboardType="decimal-pad"
+                      value={askingPrice}
+                      onChangeText={setAskingPrice}
+                      placeholderTextColor={colors.textMuted}
+                    />
+                  )}
+                </>
               )}
 
               <Text style={styles.sectionLabel}>Acquisition</Text>
@@ -1418,7 +2034,7 @@ export default function CollectionScreen() {
               )}
 
                       {/* ── Pedal History / Trace ── */}
-                      {detailPedal?.status !== 'wishlist' && (
+                      {detailPedal && (
                         <View style={styles.traceSection}>
                           <Text style={styles.sectionLabel}>Pedal History</Text>
                           {chainLoading ? (
@@ -1512,6 +2128,28 @@ export default function CollectionScreen() {
                     >
                       <Ionicons name="archive-outline" size={16} color={colors.rose} />
                       <Text style={styles.retireBtnText}>Retire this pedal</Text>
+                    </TouchableOpacity>
+                  )}
+                  {detailPedal.status === 'retired' && (
+                    <TouchableOpacity
+                      style={styles.unretireBtn}
+                      onPress={() => {
+                        Alert.alert(
+                          'Got it back?',
+                          'This will move the pedal back to your Owned list and clear the retirement details.',
+                          [
+                            { text: 'Cancel', style: 'cancel' },
+                            {
+                              text: 'Yes, move to Owned',
+                              onPress: () => handleUnretirePedal(detailPedal),
+                            },
+                          ]
+                        );
+                      }}
+                      activeOpacity={0.8}
+                    >
+                      <Ionicons name="arrow-undo-outline" size={16} color={colors.teal} />
+                      <Text style={styles.unretireBtnText}>Got it back</Text>
                     </TouchableOpacity>
                   )}
                   <TouchableOpacity
@@ -1743,6 +2381,246 @@ export default function CollectionScreen() {
           </TouchableOpacity>
         </Animated.View>
       )}
+
+      {/* ── FS/FT share card (off-screen, captured by react-native-view-shot) ── */}
+      <View style={{ position: 'absolute', left: -9999, top: -9999 }} pointerEvents="none">
+        <FsftShareCard
+          ref={fsftCardRef}
+          pedals={listedPedals
+            .filter(p => p.pedal?.brand && p.pedal?.model && p.listing_status)
+            .map(p => ({
+              brand: p.pedal!.brand,
+              model: p.pedal!.model,
+              listing_status: p.listing_status!,
+              asking_price: p.asking_price ?? null,
+            }))}
+          username={profile?.display_name ?? undefined}
+        />
+      </View>
+
+      {/* ── Share config sheet ── */}
+      <Modal
+        visible={shareConfigOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShareConfigOpen(false)}
+      >
+        <View style={styles.collectionModalOverlay}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFillObject}
+            activeOpacity={1}
+            onPress={() => setShareConfigOpen(false)}
+          />
+          <View style={styles.collectionModalSheet}>
+            {/* Handle */}
+            <View style={styles.collectionModalHandle} />
+
+            {/* Header */}
+            <View style={styles.collectionModalHeader}>
+              <Text style={styles.collectionModalTitle}>{shareSource === 'gas' ? 'Share My GAS List' : 'Share My Collection'}</Text>
+              <TouchableOpacity onPress={() => setShareConfigOpen(false)} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
+                <Ionicons name="close" size={20} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView showsVerticalScrollIndicator={false} style={{ flexGrow: 0 }}>
+
+              {/* ── Category filter ── */}
+              <Text style={styles.shareConfigLabel}>SHOW BY CATEGORY</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.shareConfigPillRow} contentContainerStyle={{ gap: spacing.xs }}>
+                {/* "All" pill */}
+                <TouchableOpacity
+                  style={[styles.shareConfigPill, shareSelCategories.length === 0 && styles.shareConfigPillActive]}
+                  onPress={() => { Haptics.selectionAsync(); setShareSelCategories([]); }}
+                >
+                  <Text style={[styles.shareConfigPillText, shareSelCategories.length === 0 && styles.shareConfigPillTextActive]}>All</Text>
+                </TouchableOpacity>
+                {availableShareCategories.map(cat => {
+                  const active = shareSelCategories.includes(cat);
+                  return (
+                    <TouchableOpacity
+                      key={cat}
+                      style={[styles.shareConfigPill, active && styles.shareConfigPillActive]}
+                      onPress={() => {
+                        Haptics.selectionAsync();
+                        setShareSelCategories(prev =>
+                          prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat]
+                        );
+                      }}
+                    >
+                      <Text style={[styles.shareConfigPillText, active && styles.shareConfigPillTextActive]}>
+                        {cat.charAt(0).toUpperCase() + cat.slice(1)}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              {/* ── Pricing ── */}
+              <Text style={styles.shareConfigLabel}>PRICING</Text>
+              <View style={styles.shareConfigPillRow2}>
+                {([
+                  { key: 'none',   label: 'None'       },
+                  { key: 'asking', label: 'Asking $'   },
+                  { key: 'market', label: '~Market'    },
+                  { key: 'paid',   label: 'Paid $'     },
+                ] as { key: PriceMode; label: string }[]).map(opt => {
+                  const active = sharePriceMode === opt.key;
+                  return (
+                    <TouchableOpacity
+                      key={opt.key}
+                      style={[styles.shareConfigPill, active && styles.shareConfigPillActive]}
+                      onPress={() => { Haptics.selectionAsync(); setSharePriceMode(opt.key); }}
+                    >
+                      <Text style={[styles.shareConfigPillText, active && styles.shareConfigPillTextActive]}>{opt.label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              {/* ── Sort ── */}
+              <Text style={styles.shareConfigLabel}>SORT BY</Text>
+              <View style={styles.shareConfigPillRow2}>
+                {([
+                  { key: 'newest', label: 'Newest'  },
+                  { key: 'oldest', label: 'Oldest'  },
+                  { key: 'value',  label: 'Value ↓' },
+                  { key: 'az',     label: 'A–Z'     },
+                ] as { key: 'newest' | 'oldest' | 'az' | 'value'; label: string }[]).map(opt => {
+                  const active = shareSort === opt.key;
+                  return (
+                    <TouchableOpacity
+                      key={opt.key}
+                      style={[styles.shareConfigPill, active && styles.shareConfigPillActive]}
+                      onPress={() => { Haptics.selectionAsync(); setShareSort(opt.key); }}
+                    >
+                      <Text style={[styles.shareConfigPillText, active && styles.shareConfigPillTextActive]}>{opt.label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              {/* ── FS/FT only toggle (hidden for GAS list) ── */}
+              {shareSource !== 'gas' && listedPedals.length > 0 && (
+                <TouchableOpacity
+                  style={styles.shareConfigToggleRow}
+                  activeOpacity={0.7}
+                  onPress={() => { Haptics.selectionAsync(); setShareFsftOnly(v => !v); }}
+                >
+                  <View>
+                    <Text style={styles.shareConfigToggleLabel}>FS/FT only</Text>
+                    <Text style={styles.shareConfigToggleSub}>Show only pedals listed for sale or trade</Text>
+                  </View>
+                  <View style={[styles.shareConfigToggle, shareFsftOnly && styles.shareConfigToggleOn]}>
+                    <View style={[styles.shareConfigToggleThumb, shareFsftOnly && styles.shareConfigToggleThumbOn]} />
+                  </View>
+                </TouchableOpacity>
+              )}
+
+            </ScrollView>
+
+            {/* ── Divider ── */}
+            <View style={styles.shareConfigDivider} />
+
+            {/* ── Pagination (if multiple pages) ── */}
+            {totalCollectionPages > 1 && (
+              <View style={styles.collectionPageNav}>
+                <TouchableOpacity
+                  style={[styles.collectionNavBtn, collectionPage === 0 && styles.collectionNavBtnDisabled]}
+                  onPress={() => setCollectionPage(p => Math.max(0, p - 1))}
+                  disabled={collectionPage === 0}
+                >
+                  <Ionicons name="chevron-back" size={22} color={collectionPage === 0 ? colors.textMuted : colors.textPrimary} />
+                </TouchableOpacity>
+
+                <View style={styles.collectionDots}>
+                  {collectionPages.slice(0, 8).map((_, i) => (
+                    <TouchableOpacity key={i} onPress={() => setCollectionPage(i)} hitSlop={{ top: 6, right: 6, bottom: 6, left: 6 }}>
+                      <View style={[styles.collectionDot, i === collectionPage && styles.collectionDotActive]} />
+                    </TouchableOpacity>
+                  ))}
+                  {totalCollectionPages > 8 && <Text style={styles.shareConfigPillText}>…</Text>}
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.collectionNavBtn, collectionPage === totalCollectionPages - 1 && styles.collectionNavBtnDisabled]}
+                  onPress={() => setCollectionPage(p => Math.min(totalCollectionPages - 1, p + 1))}
+                  disabled={collectionPage === totalCollectionPages - 1}
+                >
+                  <Ionicons name="chevron-forward" size={22} color={collectionPage === totalCollectionPages - 1 ? colors.textMuted : colors.textPrimary} />
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* ── Share button ── */}
+            {shareFilteredPedals.length > 0 ? (
+              <TouchableOpacity
+                style={styles.collectionSharePageBtn}
+                activeOpacity={0.85}
+                onPress={handleShareCurrentPage}
+              >
+                <LinearGradient colors={gradients.teal} style={styles.collectionSharePageBtnInner}>
+                  <Ionicons name="share-outline" size={18} color="#fff" />
+                  <Text style={styles.collectionSharePageBtnText}>
+                    {totalCollectionPages > 1
+                      ? `Share Page ${collectionPage + 1} of ${totalCollectionPages}`
+                      : `Share ${shareFilteredPedals.length} pedal${shareFilteredPedals.length !== 1 ? 's' : ''}`}
+                  </Text>
+                </LinearGradient>
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.collectionSharePageBtn}>
+                <View style={[styles.collectionSharePageBtnInner, { backgroundColor: colors.border }]}>
+                  <Text style={[styles.collectionSharePageBtnText, { color: colors.textMuted }]}>No pedals match this filter</Text>
+                </View>
+              </View>
+            )}
+
+            {/* Save all pages to Photos — only shown when multiple pages */}
+            {totalCollectionPages > 1 && shareFilteredPedals.length > 0 && (
+              <TouchableOpacity
+                style={styles.saveAllBtn}
+                activeOpacity={0.75}
+                onPress={handleSaveAllPages}
+                disabled={savingAllPages}
+              >
+                {savingAllPages ? (
+                  <View style={styles.saveAllBtnInner}>
+                    <ActivityIndicator size="small" color={colors.teal} />
+                    <Text style={styles.saveAllBtnText}>Saving…</Text>
+                  </View>
+                ) : (
+                  <View style={styles.saveAllBtnInner}>
+                    <Ionicons name="download-outline" size={16} color={colors.teal} />
+                    <Text style={styles.saveAllBtnText}>
+                      Save All {totalCollectionPages} Pages to Photos
+                    </Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── All collection page cards off-screen — all mounted so images pre-load in parallel ── */}
+      {collectionPages.map((pagePedals, i) => (
+        <View
+          key={`csc-page-${i}`}
+          style={{ position: 'absolute', left: -9999, top: 0 }}
+          pointerEvents="none"
+          collapsable={false}
+          ref={el => { pageRefs.current[i] = el; }}
+        >
+          <CollectionShareCard
+            pedals={pagePedals}
+            username={profile?.display_name ?? undefined}
+            priceMode={sharePriceMode}
+            subtitle={shareCardSubtitle}
+            title={shareSource === 'gas' ? 'MY GAS LIST' : undefined}
+          />
+        </View>
+      ))}
     </View>
   );
 }
@@ -1752,8 +2630,8 @@ type AddPedalModalProps = {
   visible: boolean;
   onClose: () => void;
   onAdded: (brand?: string, model?: string, isOwned?: boolean) => void;
-  session: ReturnType<typeof useStore>['session'];
-  defaultTab: 'owned' | 'wishlist' | 'retired';
+  session: Session | null;
+  defaultTab: 'owned' | 'wishlist' | 'listed';
 };
 
 type ReverbResult = {
@@ -1844,7 +2722,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
       setReverbResults([]);
 
       // Fire Reverb search in background — doesn't block catalog results
-      invokeEdgeFunction('search-pedals', { query: safe }).then(({ data, error }) => {
+      invokeEdgeFunction<SearchReverbResponse>('search-pedals', { query: safe }).then(({ data, error }) => {
         if (searchIdRef.current !== searchId) return; // stale, discard
         if (error) {
           // Extract HTTP status from FunctionsHttpError to pinpoint the failure
@@ -1867,7 +2745,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
 
       // Catalog search via edge function (service-role — bypasses any RLS restrictions)
       try {
-        const { data } = await invokeEdgeFunction('search-pedals', {
+        const { data } = await invokeEdgeFunction<PedalSearchLocalResponse>('search-pedals', {
           query: safe,
           localOnly: true,
         });
@@ -1915,7 +2793,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
   const handleSelectReverbResult = async (result: ReverbResult) => {
     Haptics.selectionAsync();
     setUpsertingFromReverb(true);
-    const { data, error } = await invokeEdgeFunction('search-pedals', {
+    const { data, error } = await invokeEdgeFunction<SearchUpsertResponse>('search-pedals', {
       action: 'upsert',
       brand: result.brand,
       model: result.model,
@@ -1994,9 +2872,11 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
       setAddError('Select a pedal to continue.');
       return;
     }
-    if (!session) {
-      setAddError('Session expired. Please sign in again.');
-      Alert.alert('Session expired', 'Please sign in again.');
+    // Validate live session — the store may hold a stale reference after token expiry
+    const { data: { session: liveSession } } = await supabase.auth.getSession();
+    if (!liveSession) {
+      setAddError('Session expired. Please sign out and sign in again.');
+      Alert.alert('Session expired', 'Please go to your Profile tab and sign out, then sign in again.');
       return;
     }
       if (!acquisitionType) {
@@ -2031,7 +2911,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
       const { data: existing } = await supabase
         .from('user_pedals')
         .select('id')
-        .eq('user_id', session.user.id)
+        .eq('user_id', liveSession.user.id)
         .eq('pedal_id', selectedPedal.id)
         .eq('status', status)
         .maybeSingle();
@@ -2082,7 +2962,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
         if (rpcError) error = rpcError;
       } else {
         const { error: insertError } = await supabase.from('user_pedals').insert({
-          user_id: session.user.id,
+          user_id: liveSession.user.id,
           pedal_id: selectedPedal.id,
           colorway_id: status === 'owned' ? (selectedColorwayId ?? null) : null,
           status,
@@ -2114,12 +2994,18 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
   };
 
   const handleAddPrevious = async () => {
-    if (!selectedPedal || !session) return;
+    if (!selectedPedal) return;
+    const { data: { session: liveSession } } = await supabase.auth.getSession();
+    if (!liveSession) {
+      setAddError('Session expired. Please sign out and sign in again.');
+      Alert.alert('Session expired', 'Please go to your Profile tab and sign out, then sign in again.');
+      return;
+    }
     setIsAdding(true);
     setAddError('');
     const today = new Date().toISOString().split('T')[0];
     const { error } = await supabase.from('user_pedals').insert({
-      user_id: session.user.id,
+      user_id: liveSession.user.id,
       pedal_id: selectedPedal.id,
       colorway_id: selectedColorwayId ?? null,
       status: 'retired',
@@ -2140,7 +3026,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
     const model = manualModel.trim();
     if (!brand || !model) return;
     setIsUpsertingManual(true);
-    const { data, error } = await invokeEdgeFunction('search-pedals', {
+    const { data, error } = await invokeEdgeFunction<SearchUpsertResponse>('search-pedals', {
       action: 'upsert',
       brand,
       model,
@@ -2194,8 +3080,8 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
     >
       <KeyboardAvoidingView
         style={styles.modalOverlay}
-        behavior={Platform.OS === 'ios' ? 'position' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? -10 : 0}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={0}
       >
         <TouchableOpacity style={styles.modalBackdrop} onPress={handleClose} activeOpacity={1} />
         <View style={styles.modalSheet}>
@@ -2204,8 +3090,8 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
 
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Add Pedal</Text>
-            <TouchableOpacity onPress={handleClose}>
-              <Ionicons name="close" size={24} color={colors.textMuted} />
+            <TouchableOpacity onPress={handleClose} activeOpacity={0.7} style={{ padding: spacing.sm }}>
+              <Ionicons name="close" size={20} color={colors.textMuted} />
             </TouchableOpacity>
           </View>
 
@@ -2228,7 +3114,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
                       activeOpacity={0.8}
                     >
                   <Text style={[styles.acqChipText, acquisitionType === type && styles.acqChipTextActive]}>
-                    {type === 'bought' ? 'Bought' : type === 'traded' ? 'Traded' : 'Wishlist'}
+                    {type === 'bought' ? 'Bought' : type === 'traded' ? 'Traded' : 'GAS List'}
                   </Text>
                 </TouchableOpacity>
               ))}
@@ -2537,7 +3423,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
                   ) : (
                     <Text style={styles.addBtnText}>
                       {acquisitionType === 'wishlist'
-                        ? 'Add to Wishlist'
+                        ? 'Add to GAS List'
                         : acquisitionType === 'traded' && !showTradeDetails
                         ? 'Continue Trade Details'
                         : 'Add to Vault'}
@@ -2563,81 +3449,88 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
               {upsertingFromReverb && (
                 <ActivityIndicator size="small" color={colors.teal} style={{ marginVertical: spacing.md }} />
               )}
-              {results.length === 0 && reverbResults.length === 0 && search.length > 0 && !isSearching && (
-                <View style={styles.noResultsWrap}>
-                  <Text style={styles.noResults}>No results for "{search}"</Text>
-                  {!showManualAdd ? (
+              {/* Always show manual entry once the user has typed something */}
+              {search.length > 0 && !isSearching && !showManualAdd && (
+                <TouchableOpacity
+                  style={styles.manualAddTrigger}
+                  onPress={() => {
+                    // Split "brand model" on first word so fields are pre-filled correctly.
+                    // e.g. "hologram chroma console" → brand="Hologram", model="Chroma Console"
+                    const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+                    const parts = search.trim().split(/\s+/);
+                    setManualBrand(parts[0] ? cap(parts[0]) : '');
+                    setManualModel(parts.slice(1).map(cap).join(' '));
+                    setShowManualAdd(true);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="add-circle-outline" size={16} color={colors.teal} />
+                  <Text style={styles.manualAddTriggerText}>
+                    {results.length === 0 && reverbResults.length === 0
+                      ? `No results — add "${search}" manually`
+                      : "Can't find it? Add manually"}
+                  </Text>
+                </TouchableOpacity>
+              )}
+
+              {showManualAdd && (
+                <View style={styles.manualAddForm}>
+                  <Text style={styles.manualAddLabel}>Add to catalog</Text>
+                  <TextInput
+                    style={styles.manualInput}
+                    value={manualBrand}
+                    onChangeText={setManualBrand}
+                    placeholder="Brand"
+                    placeholderTextColor={colors.textMuted}
+                    autoCapitalize="words"
+                  />
+                  <TextInput
+                    style={styles.manualInput}
+                    value={manualModel}
+                    onChangeText={setManualModel}
+                    placeholder="Model"
+                    placeholderTextColor={colors.textMuted}
+                    autoCapitalize="words"
+                  />
+                  <Text style={styles.manualCategoryLabel}>Category</Text>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={{ gap: 8, paddingBottom: 4 }}
+                  >
+                    {CATEGORIES.map(cat => (
+                      <TouchableOpacity
+                        key={cat}
+                        style={[styles.chip, manualCategory === cat && styles.chipActive]}
+                        onPress={() => setManualCategory(cat)}
+                      >
+                        <Text style={[styles.chipText, manualCategory === cat && styles.chipTextActive]}>
+                          {cat.charAt(0).toUpperCase() + cat.slice(1)}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+                  <View style={styles.addButtons}>
                     <TouchableOpacity
-                      style={styles.manualAddTrigger}
-                      onPress={() => {
-                        setShowManualAdd(true);
-                        setManualModel(search.trim());
-                      }}
+                      style={[styles.addBtn, { backgroundColor: colors.border }]}
+                      onPress={() => setShowManualAdd(false)}
                       activeOpacity={0.7}
                     >
-                      <Ionicons name="add-circle-outline" size={16} color={colors.teal} />
-                      <Text style={styles.manualAddTriggerText}>Add manually</Text>
+                      <Text style={[styles.addBtnText, { color: colors.textMuted }]}>Cancel</Text>
                     </TouchableOpacity>
-                  ) : (
-                    <View style={styles.manualAddForm}>
-                      <Text style={styles.manualAddLabel}>Add to catalog</Text>
-                      <TextInput
-                        style={styles.manualInput}
-                        value={manualBrand}
-                        onChangeText={setManualBrand}
-                        placeholder="Brand"
-                        placeholderTextColor={colors.textMuted}
-                        autoCapitalize="words"
-                      />
-                      <TextInput
-                        style={styles.manualInput}
-                        value={manualModel}
-                        onChangeText={setManualModel}
-                        placeholder="Model"
-                        placeholderTextColor={colors.textMuted}
-                        autoCapitalize="words"
-                      />
-                      <Text style={styles.manualCategoryLabel}>Category</Text>
-                      <ScrollView
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                        contentContainerStyle={{ gap: 8, paddingBottom: 4 }}
-                      >
-                        {CATEGORIES.map(cat => (
-                          <TouchableOpacity
-                            key={cat}
-                            style={[styles.chip, manualCategory === cat && styles.chipActive]}
-                            onPress={() => setManualCategory(cat)}
-                          >
-                            <Text style={[styles.chipText, manualCategory === cat && styles.chipTextActive]}>
-                              {cat.charAt(0).toUpperCase() + cat.slice(1)}
-                            </Text>
-                          </TouchableOpacity>
-                        ))}
-                      </ScrollView>
-                      <View style={styles.addButtons}>
-                        <TouchableOpacity
-                          style={[styles.addBtn, { backgroundColor: colors.border }]}
-                          onPress={() => setShowManualAdd(false)}
-                          activeOpacity={0.7}
-                        >
-                          <Text style={[styles.addBtnText, { color: colors.textMuted }]}>Cancel</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={[styles.addBtn, styles.addBtnOwned]}
-                          onPress={handleManualUpsert}
-                          disabled={isUpsertingManual || !manualBrand.trim() || !manualModel.trim()}
-                          activeOpacity={0.8}
-                        >
-                          {isUpsertingManual ? (
-                            <ActivityIndicator size="small" color="#fff" />
-                          ) : (
-                            <Text style={styles.addBtnText}>Add to Catalog</Text>
-                          )}
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  )}
+                    <TouchableOpacity
+                      style={[styles.addBtn, styles.addBtnOwned]}
+                      onPress={handleManualUpsert}
+                      disabled={isUpsertingManual || !manualBrand.trim() || !manualModel.trim()}
+                      activeOpacity={0.8}
+                    >
+                      {isUpsertingManual ? (
+                        <ActivityIndicator size="small" color="#fff" />
+                      ) : (
+                        <Text style={styles.addBtnText}>Add to Catalog</Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
                 </View>
               )}
               {search.length === 0 && (
@@ -2784,14 +3677,13 @@ const styles = StyleSheet.create({
   tabActive: {
     borderColor: colors.teal + '60',
   },
-  tabGradient: {
+  tabGradientContent: {
+    ...StyleSheet.absoluteFillObject,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.sm,
-    width: '100%',
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
+    paddingHorizontal: spacing.sm,
   },
   tabInner: {
     flexDirection: 'row',
@@ -2912,6 +3804,17 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.teal + '40',
   },
+  actionFull: {
+    flex: 1,
+  },
+  actionFullCard: {
+    borderRadius: radius.xl,
+    padding: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    justifyContent: 'center',
+  },
   actionHalfTitle: {
     fontSize: typography.sizes.base,
     fontFamily: typography.bodySemiBold,
@@ -2942,6 +3845,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.base,
     paddingBottom: 24,
     maxHeight: '92%',
+    flex: 1,
   },
   modalHandle: {
     width: 36,
@@ -2957,6 +3861,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: spacing.base,
+    paddingRight: spacing.lg,
   },
   modalTitle: {
     fontSize: typography.sizes.lg,
@@ -3433,6 +4338,24 @@ const styles = StyleSheet.create({
     fontFamily: typography.bodyMedium,
     color: colors.rose,
   },
+  unretireBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    height: 44,
+    borderWidth: 1,
+    borderColor: colors.teal + '80',
+    borderRadius: radius.lg,
+    paddingVertical: 10,
+    paddingHorizontal: spacing.md,
+    justifyContent: 'center',
+  },
+  unretireBtnText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodyMedium,
+    color: colors.teal,
+  },
   detailDangerRow: {
     flexDirection: 'row',
     gap: spacing.sm,
@@ -3456,7 +4379,7 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
   resultsList: {
-    maxHeight: 360,
+    flex: 1,
   },
   resultRow: {
     borderBottomWidth: 1,
@@ -3561,6 +4484,7 @@ const styles = StyleSheet.create({
   },
   // Selected pedal
   selectedPedalWrap: {
+    flex: 1,
     gap: spacing.base,
   },
   selectedPedalContent: {
@@ -3952,5 +4876,362 @@ const styles = StyleSheet.create({
     fontSize: typography.sizes.sm,
     fontFamily: typography.bodySemiBold,
     color: colors.teal,
+  },
+
+  // ── Target price / price alert ───────────────────────────────────────────
+  targetPriceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.sm,
+    marginBottom: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  targetPriceLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  targetPriceLabel: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.teal,
+  },
+  targetPriceInputWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
+    minWidth: 80,
+  },
+  targetPriceCurrency: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+    marginRight: 2,
+  },
+  targetPriceInput: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textPrimary,
+    minWidth: 50,
+    padding: 0,
+  },
+  keyboardAccessory: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    backgroundColor: colors.surface,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    alignItems: 'flex-end',
+  },
+  keyboardAccessoryButton: {
+    backgroundColor: colors.teal + '18',
+    borderWidth: 1,
+    borderColor: colors.teal + '55',
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  keyboardAccessoryButtonText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.teal,
+  },
+
+  // ── Share strips (collection / GAS / FS/FT) ──────────────────────────────
+  shareCollectionRow: {
+    marginTop: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.base,
+    paddingVertical: 11,
+    backgroundColor: colors.teal + '0F',
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: colors.teal + '28',
+  },
+  shareCollectionText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.teal,
+  },
+
+  // ── Share GAS List strip ──────────────────────────────────────────────────
+  shareGasListRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.base,
+    paddingVertical: spacing.sm,
+  },
+  shareGasListText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.teal,
+  },
+  shareGasListCount: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+  },
+
+  // ── Share config sheet ────────────────────────────────────────────────────
+  shareConfigLabel: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textMuted,
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginTop: spacing.md,
+    marginBottom: spacing.xs,
+  },
+  shareConfigPillRow: {
+    flexDirection: 'row',
+    marginBottom: spacing.xs,
+  },
+  shareConfigPillRow2: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  shareConfigPill: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.full,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    backgroundColor: colors.surface,
+  },
+  shareConfigPillActive: {
+    backgroundColor: colors.teal,
+    borderColor: colors.teal,
+  },
+  shareConfigPillText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodyMedium,
+    color: colors.textSecondary,
+  },
+  shareConfigPillTextActive: {
+    color: '#fff',
+    fontFamily: typography.bodySemiBold,
+  },
+  shareConfigToggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.md,
+    marginTop: spacing.xs,
+  },
+  shareConfigToggleLabel: {
+    fontSize: typography.sizes.base,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textPrimary,
+  },
+  shareConfigToggleSub: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  shareConfigToggle: {
+    width: 44,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: colors.border,
+    justifyContent: 'center',
+    paddingHorizontal: 2,
+  },
+  shareConfigToggleOn: {
+    backgroundColor: colors.teal,
+  },
+  shareConfigToggleThumb: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#fff',
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 2,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 2,
+  },
+  shareConfigToggleThumbOn: {
+    alignSelf: 'flex-end',
+  },
+  shareConfigDivider: {
+    height: 1,
+    backgroundColor: colors.border,
+    marginVertical: spacing.md,
+  },
+  saveAllBtn: {
+    marginTop: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.teal + '55',
+    borderRadius: radius.full,
+    overflow: 'hidden',
+  },
+  saveAllBtnInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.md,
+  },
+  saveAllBtnText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.teal,
+  },
+
+  // ── Collection share pagination modal ─────────────────────────────────────
+  collectionModalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.4)',
+  },
+  collectionModalSheet: {
+    backgroundColor: colors.background,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    paddingHorizontal: spacing.base,
+    paddingBottom: spacing.xxl,
+    paddingTop: spacing.sm,
+    gap: spacing.md,
+  },
+  collectionModalHandle: {
+    width: 40,
+    height: 4,
+    backgroundColor: colors.border,
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginBottom: spacing.xs,
+  },
+  collectionModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  collectionModalTitle: {
+    fontSize: typography.sizes.md,
+    fontFamily: typography.display,
+    color: colors.textPrimary,
+  },
+  collectionPageInfo: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.body,
+    color: colors.textSecondary,
+    textAlign: 'center',
+  },
+  collectionPageNav: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginVertical: spacing.sm,
+  },
+  collectionNavBtn: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  collectionNavBtnDisabled: {
+    opacity: 0.3,
+  },
+  collectionDots: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    alignItems: 'center',
+  },
+  collectionDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: colors.border,
+  },
+  collectionDotActive: {
+    backgroundColor: colors.teal,
+    width: 20,
+    borderRadius: 4,
+  },
+  collectionSharePageBtn: {
+    borderRadius: radius.full,
+    overflow: 'hidden',
+    marginTop: spacing.xs,
+  },
+  collectionSharePageBtnInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.md,
+  },
+  collectionSharePageBtnText: {
+    fontSize: typography.sizes.base,
+    fontFamily: typography.bodySemiBold,
+    color: '#fff',
+  },
+
+  // ── Gear Journey Card ─────────────────────────────────────────────────────
+  gearJourneyCard: {
+    marginHorizontal: spacing.base,
+    marginBottom: spacing.md,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    gap: spacing.xs,
+  },
+  gearJourneyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  gearJourneyMeta: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.body,
+    color: colors.textSecondary,
+  },
+  gearJourneyValue: {
+    fontFamily: typography.bodySemiBold,
+    color: colors.textPrimary,
+  },
+  gearJourneyPL: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  gearJourneyPLItem: {
+    alignItems: 'flex-start',
+    gap: 2,
+  },
+  gearJourneyPLLabel: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+  },
+  gearJourneyPLAmount: {
+    fontSize: typography.sizes.base,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textPrimary,
+  },
+  gearJourneyNetBadge: {
+    marginLeft: 'auto' as any,
+    borderRadius: radius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+  },
+  gearJourneyNetText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
   },
 });
