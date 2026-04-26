@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Image, Modal, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Animated, AppState, Easing, Image, Modal, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import Constants from 'expo-constants';
 import * as SplashScreen from 'expo-splash-screen';
 import { useFonts } from 'expo-font';
 import { SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk';
@@ -12,21 +13,24 @@ import {
 } from '@expo-google-fonts/inter';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { NavigationContainer } from '@react-navigation/native';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
+import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from './src/lib/supabase';
 import { useStore } from './src/hooks/useStore';
-import { configureRevenueCat, hasBetaFullAccess } from './src/lib/subscription';
+import { configureRevenueCat, syncEntitlement, hasBetaFullAccess } from './src/lib/subscription';
 import {
   requestNotificationPermissions,
   scheduleWeeklyPickNotification,
   scheduleVaultDigestNotification,
+  scheduleReengagementNotification,
+  savePushToken,
   cancelAllTpcNotifications,
 } from './src/lib/notifications';
 import { colors, typography } from './src/theme';
-import { PlayerOnboarding, PostOnboardingScreen } from './src/components';
+import { PlayerOnboarding, PostOnboardingScreen, WelcomeOnboarding } from './src/components';
 import { RootStackParamList, HomeStackParamList, BoardsStackParamList, AIStackParamList } from './src/types/navigation';
 import PaywallScreen from './src/screens/PaywallScreen';
 
@@ -52,9 +56,14 @@ const HomeStack = createNativeStackNavigator<HomeStackParamList>();
 const BoardsStack = createNativeStackNavigator<BoardsStackParamList>();
 const AIStack = createNativeStackNavigator<AIStackParamList>();
 
+const navigationRef = createNavigationContainerRef();
+
 const splashSquare = require('./assets/tpc-square.png');
 const splashText = require('./assets/tpc-text.png');
 const splashFinal = require('./assets/tpc-final.png');
+const AUTH_TRACE = false;
+const SIGNED_OUT_CONFIRM_DELAY_MS = 700;
+const IS_EXPO_GO = Constants.appOwnership === 'expo';
 
 function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
   const { width } = useWindowDimensions();
@@ -200,9 +209,9 @@ function BoardsStackNavigator() {
 function AIStackNavigator() {
   return (
     <AIStack.Navigator screenOptions={{ headerShown: false }}>
-      <AIStack.Screen name="AIHub"   component={AIHubScreen} />
       <AIStack.Screen name="Advisor" component={AdvisorScreen} />
       <AIStack.Screen name="Finder"  component={FinderScreen} />
+      <AIStack.Screen name="AIHub"   component={AIHubScreen} />
     </AIStack.Navigator>
   );
 }
@@ -214,6 +223,7 @@ function MainTabs() {
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
+        lazy: true,          // defer mounting until first visit — cuts startup time
         tabBarStyle: styles.tabBar,
         tabBarActiveTintColor: colors.teal,
         tabBarInactiveTintColor: colors.textMuted,
@@ -223,22 +233,12 @@ function MainTabs() {
           </Text>
         ),
         tabBarIcon: ({ focused, color, size }) => {
-          // Vault uses MaterialCommunityIcons safe icon
-          if (route.name === 'Vault') {
-            return (
-              <MaterialCommunityIcons
-                name={focused ? 'safe' : 'safe-square-outline'}
-                size={size}
-                color={color}
-              />
-            );
-          }
-          // All others use Ionicons
           const iconMap: Record<string, [string, string]> = {
-            Home:    ['home',             'home-outline'],
-            Boards:  ['albums',           'albums-outline'],
-            Videos:  ['play-circle',      'play-circle-outline'],
-            'TPC.ai': ['sparkles',         'sparkles-outline'],    // center — most premium
+            Home:     ['home',              'home-outline'],
+            Vault:    ['file-tray-full',    'file-tray-full-outline'],
+            Boards:   ['grid',              'grid-outline'],
+            Videos:   ['play-circle',       'play-circle-outline'],
+            'TPC.ai': ['sparkles',          'sparkles-outline'],
           };
           const [active, inactive] = iconMap[route.name] ?? ['help-circle', 'help-circle-outline'];
           return (
@@ -280,12 +280,13 @@ export default function App() {
   const {
     session, setSession, refreshUserImages, profile, fetchProfile,
     paywallVisible, paywallReason, closePaywall,
-    ownedPedals, totalMarketValue,
+    ownedPedals, wishlistPedals, totalMarketValue,
   } = useStore();
   const [initialized, setInitialized] = useState(false);
   const [showAnimatedSplash, setShowAnimatedSplash] = useState(true);
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [showPostOnboarding, setShowPostOnboarding] = useState(false);
+  const [showWelcome, setShowWelcome] = useState(false);
 
   const [fontsLoaded] = useFonts({
     RuckSackBlack: require('./assets/fonts/RuckSackBlack.otf'),
@@ -294,6 +295,18 @@ export default function App() {
     Inter_500Medium,
     Inter_600SemiBold,
   });
+
+  // First-run welcome onboarding — shown only once, before login
+  useEffect(() => {
+    AsyncStorage.getItem('tpc_welcome_shown').then(val => {
+      if (!val) setShowWelcome(true);
+    });
+  }, []);
+
+  const dismissWelcome = () => {
+    setShowWelcome(false);
+    AsyncStorage.setItem('tpc_welcome_shown', '1');
+  };
 
   // Bootstrap Supabase auth
   useEffect(() => {
@@ -315,29 +328,83 @@ export default function App() {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
-      // Beta safety: ignore external SIGNED_OUT churn from transient token issues.
-      // Explicit in-app sign out already clears store state directly.
-      if (event === 'SIGNED_OUT') return;
-      if (session) {
+      if (__DEV__ && AUTH_TRACE) {
+        console.warn('[AuthTrace] onAuthStateChange', {
+          event,
+          hasSession: !!session,
+          userId: session?.user?.id ?? null,
+        });
+      }
+      if (event === 'SIGNED_OUT') {
+        // Expo Go auth state can churn and emit false SIGNED_OUT events.
+        // Ignore auto SIGNED_OUT in Expo Go; explicit in-app Sign Out still clears state.
+        if (IS_EXPO_GO) {
+          if (__DEV__ && AUTH_TRACE) {
+            console.warn('[Auth] Ignoring SIGNED_OUT in Expo Go');
+          }
+          return;
+        }
+
+        // Expo Go can emit transient SIGNED_OUT during token churn.
+        // Confirm twice + attempt one refresh before clearing app state.
+        setTimeout(async () => {
+          try {
+            const { data: first } = await supabase.auth.getSession();
+            if (first.session?.user) return;
+
+            const { data: refreshed } = await supabase.auth.refreshSession();
+            if (refreshed.session?.user) {
+              setSession(refreshed.session);
+              return;
+            }
+
+            const { data: second } = await supabase.auth.getSession();
+            if (second.session?.user) {
+              setSession(second.session);
+              return;
+            }
+            setSession(null);
+          } catch {
+            setSession(null);
+          }
+        }, SIGNED_OUT_CONFIRM_DELAY_MS);
+        return;
+      }
+      // Guard against transient null sessions emitted on non-signout events.
+      // We only clear on explicit SIGNED_OUT.
+      if (session?.user) {
         setSession(session);
+      } else if (__DEV__ && AUTH_TRACE) {
+        console.warn('[Auth] Ignoring non-signed-out auth event with null session:', event);
       }
     });
 
     return () => subscription.unsubscribe();
   }, []);
 
-  // Hide splash once fonts + auth are ready
   useEffect(() => {
-    if (fontsLoaded && initialized) {
-      SplashScreen.hideAsync();
+    if (__DEV__ && AUTH_TRACE) {
+      console.warn('[AuthTrace] App session state', {
+        hasSession: !!session,
+        userId: session?.user?.id ?? null,
+      });
     }
-  }, [fontsLoaded, initialized]);
+  }, [session?.user?.id, session]);
+
+  // Hide the native splash immediately on first mount so only our
+  // AnimatedSplash is visible — avoids a flash of the native splash icon
+  // before the JS animation kicks in.
+  useEffect(() => {
+    SplashScreen.hideAsync().catch(() => {});
+  }, []);
 
   // Configure RevenueCat and sync Pro entitlement whenever user signs in
   useEffect(() => {
     if (!session?.user?.id) return;
     const userId = session.user.id;
     configureRevenueCat(userId);
+    // Sync RevenueCat entitlement → Supabase on every sign-in (non-blocking)
+    syncEntitlement(userId).catch(() => {});
     // Beta builds grant full access via app.json flag — mirror that into the DB so
     // server-side edge functions (which check is_premium directly) also accept the user.
     if (hasBetaFullAccess()) {
@@ -348,9 +415,15 @@ export default function App() {
     requestNotificationPermissions().then(granted => {
       if (!granted) return;
       scheduleWeeklyPickNotification().catch(() => {});
-      scheduleVaultDigestNotification(ownedPedals.length, totalMarketValue).catch(() => {});
+      savePushToken(userId).catch(() => {});
     });
   }, [session?.user?.id]);
+
+  // Keep the weekly vault digest content in sync with live collection/value.
+  useEffect(() => {
+    if (!session?.user?.id) return;
+    scheduleVaultDigestNotification(ownedPedals.length, totalMarketValue).catch(() => {});
+  }, [session?.user?.id, ownedPedals.length, totalMarketValue]);
 
   // Cancel notifications on sign-out
   useEffect(() => {
@@ -358,6 +431,19 @@ export default function App() {
       cancelAllTpcNotifications().catch(() => {});
     }
   }, [session]);
+
+  // Re-engagement notification — reset 4-day clock every time app comes to foreground
+  useEffect(() => {
+    if (!session) return;
+    // Schedule immediately on mount (first open of the session)
+    scheduleReengagementNotification(wishlistPedals.length).catch(() => {});
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        scheduleReengagementNotification(wishlistPedals.length).catch(() => {});
+      }
+    });
+    return () => sub.remove();
+  }, [session, wishlistPedals.length]);
 
   useEffect(() => {
     if (!session) return;
@@ -384,15 +470,19 @@ export default function App() {
     !profile?.pedal_expert_profile?.onboarding_completed_at &&
     !isSkippedRecently(profile?.pedal_expert_profile?.onboarding_skipped_at);
 
-  // Keep splash visible while loading
-  if (!fontsLoaded || !initialized) {
-    return null;
-  }
-
-  const baseContent = !session ? (
-    <AuthScreen />
+  // Only build the real app tree once fonts + auth are both ready.
+  // AnimatedSplash covers the screen until then so no content flash.
+  const baseContent = (!fontsLoaded || !initialized) ? null : !session ? (
+    showWelcome ? (
+      <WelcomeOnboarding
+        onGetStarted={dismissWelcome}
+        onSignIn={dismissWelcome}
+      />
+    ) : (
+      <AuthScreen />
+    )
   ) : (
-    <NavigationContainer>
+    <NavigationContainer ref={navigationRef}>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         <Stack.Screen name="Main" component={MainTabs} />
         <Stack.Screen name="Profile" component={ProfileScreen} />
@@ -471,8 +561,16 @@ export default function App() {
               <PostOnboardingScreen
                 onGetMyPick={() => {
                   setShowPostOnboarding(false);
-                  // Navigation to Finder happens via home screen after modal closes
-                  // The AI hero card will be front-and-center on home
+                  // Navigate into Expert Mode (Custom Shop) after modal closes
+                  setTimeout(() => {
+                    if (navigationRef.isReady()) {
+                      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                      (navigationRef.navigate as any)(
+                        'Main',
+                        { screen: 'TPC.ai', params: { screen: 'Finder', params: { startMode: 'expert' } } },
+                      );
+                    }
+                  }, 350);
                 }}
                 onExplore={() => setShowPostOnboarding(false)}
               />

@@ -71,6 +71,8 @@ const SecureStorageAdapter = {
   },
 };
 
+export { SecureStorageAdapter };
+
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     storage: SecureStorageAdapter,
@@ -80,36 +82,66 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   },
 });
 
+// ─── Auth header cache ────────────────────────────────────────────────────────
+// Supabase JWTs are valid for 1 hour; we cache for 4 minutes to avoid
+// redundant SecureStore reads on rapid successive edge function calls.
+// Cleared on every auth state change (sign-in / sign-out / token refresh).
+let _cachedAuthHeader: { header: Record<string, string>; expiresAt: number } | null = null;
+
+supabase.auth.onAuthStateChange(() => {
+  _cachedAuthHeader = null;
+});
+
+export async function getEdgeAuthHeaders(): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (_cachedAuthHeader && _cachedAuthHeader.expiresAt > now) {
+    return _cachedAuthHeader.header;
+  }
+  const { data: sessionData } = await supabase.auth.getSession();
+  const header = sessionData.session?.access_token
+    ? { Authorization: `Bearer ${sessionData.session.access_token}` }
+    : {};
+  if (sessionData.session?.access_token) {
+    _cachedAuthHeader = { header, expiresAt: now + 4 * 60 * 1000 }; // 4 min
+  }
+  return header;
+}
+
 export function invokeEdgeFunction<T = unknown>(
   name: string,
   body: Record<string, unknown>
 ) {
   return (async () => {
-    const getAccessToken = async (): Promise<string | null> => {
-      const { data: sessionData } = await supabase.auth.getSession();
-      if (sessionData.session?.access_token) return sessionData.session.access_token;
-      // One recovery attempt for stale in-memory auth state.
-      await supabase.auth.refreshSession();
-      const { data: refreshed } = await supabase.auth.getSession();
-      return refreshed.session?.access_token ?? null;
-    };
-
     const run = async () => {
-      const accessToken = await getAccessToken();
-      return supabase.functions.invoke<T>(name, {
-        body,
-        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
-      });
+      const headers = await getEdgeAuthHeaders();
+      return supabase.functions.invoke<T>(name, { body, headers });
     };
 
-    let res = await run();
-    const status = (res.error as { context?: { status?: number } } | null)?.context?.status;
-    if (status === 401) {
-      // One retry after refresh for stale access tokens.
-      await supabase.auth.refreshSession();
-      res = await run();
-    }
-    return res;
+    const readErrorContext = async (error: unknown): Promise<{ status?: number; body: string }> => {
+      const anyErr = error as { context?: { status?: number; text?: () => Promise<string> } } | null;
+      const status = anyErr?.context?.status;
+      let body = '';
+      if (anyErr?.context?.text) {
+        try { body = await anyErr.context.text(); } catch {}
+      }
+      return { status, body };
+    };
+
+    const first = await run();
+    if (!first.error) return first;
+
+    // Token can be stale during refresh races in Expo Go.
+    // Retry once for any 401 from edge functions.
+    const firstCtx = await readErrorContext(first.error);
+    const isUnauthorized401 = firstCtx.status === 401;
+
+    if (!isUnauthorized401) return first;
+
+    const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
+    if (refreshError || !refreshed.session?.access_token) return first;
+
+    const second = await run();
+    return second;
   })();
 }
 
@@ -130,6 +162,10 @@ export type Pedal = {
   avg_price: number | null;
   in_production: boolean;
   image_url: string | null;
+  /** Where the image came from — used to prefer higher-quality sources */
+  image_source: 'manufacturer' | 'preferred_seller' | 'reverb_listing' | 'user_contributed' | null;
+  /** Path in the 'pedal-images' Supabase Storage bucket (permanent copy) */
+  image_storage_path: string | null;
 };
 
 export type PedalColorway = {
@@ -172,6 +208,9 @@ export type UserPedal = {
   serial_number: string | null;
   traded_from_user_pedal_id: string | null;
   trade_cash_paid: number | null;
+  listing_status: 'for_sale' | 'for_trade' | 'for_sale_or_trade' | null;
+  asking_price: number | null;
+  trade_wants: string | null;
   created_at: string;
   pedal?: Pedal;
   colorway?: PedalColorway;
@@ -229,6 +268,7 @@ export type UserProfile = {
   display_name: string | null;
   is_admin: boolean;
   is_premium: boolean;
+  pro_source?: string | null;
   pedal_finder_uses_today: number;
   pedal_expert_profile: FullExpertProfile | null;
   created_at: string;

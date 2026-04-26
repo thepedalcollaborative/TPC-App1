@@ -1,10 +1,19 @@
 import { create } from 'zustand';
 import { Session } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { supabase, UserPedal, Board, UserProfile, invokeEdgeFunction } from '../lib/supabase';
+import Constants from 'expo-constants';
+import { supabase, Pedal, UserPedal, Board, UserProfile, invokeEdgeFunction, SecureStorageAdapter } from '../lib/supabase';
 import type { PaywallReason } from '../screens/PaywallScreen';
 import { hasBetaFullAccess } from '../lib/subscription';
 import type { LastPick } from '../lib/subscription';
+
+let marketValuesRefreshInFlight = false;
+let imageEnrichmentInFlight = false;
+const AUTH_TRACE = false;
+const IS_EXPO_GO =
+  Constants.appOwnership === 'expo' ||
+  (Constants as unknown as { executionEnvironment?: string }).executionEnvironment === 'storeClient';
+let explicitSignOutInProgress = false;
 
 type Store = {
   // Auth
@@ -40,11 +49,15 @@ type Store = {
   // Milestone to celebrate (set after fetchPedals detects a new milestone)
   milestoneToShow: number | null;
   clearMilestone: () => void;
+  // Value milestone (dollars) to celebrate (set after market values update)
+  valueMilestoneToShow: number | null;
+  clearValueMilestone: () => void;
 
   // Pedals
   ownedPedals: UserPedal[];
   wishlistPedals: UserPedal[];
   retiredPedals: UserPedal[];
+  listedPedals: UserPedal[]; // ownedPedals where listing_status IS NOT NULL
   totalInvested: number;
   marketValues: Record<string, number>;  // pedal_id → market_value
   totalMarketValue: number;
@@ -72,9 +85,69 @@ type Store = {
     catalogData?: { category: string; subcategory: string; description: string; analog: boolean; price: number | null }
   ) => Promise<'added' | 'exists' | 'not_found' | 'error'>;
 
+  // FS/FT listing
+  updateListingStatus: (
+    userPedalId: string,
+    listing: { listing_status: UserPedal['listing_status']; asking_price: number | null; trade_wants: string | null }
+  ) => Promise<{ error: string | null }>;
+
   // Auth actions
   signOut: () => Promise<void>;
+  deleteAccount: () => Promise<{ success: boolean; error?: string }>;
 };
+
+type WeeklyPickResponse = {
+  brand: string;
+  model: string;
+  why: string;
+  category: string | null;
+  weekKey: string;
+  generatedAt: string;
+};
+
+type MarketValueResponse = {
+  market_value?: number;
+};
+
+type SearchPedalsUpsertResponse = {
+  pedal?: { id: string; avg_price?: number | null };
+};
+
+const PEDAL_CATEGORY_SET = new Set([
+  'drive',
+  'boost',
+  'compressor',
+  'eq',
+  'delay',
+  'reverb',
+  'modulation',
+  'looper',
+  'pitch',
+  'utility',
+  'ambient',
+  'synth',
+  'other',
+  'multifx',
+  'modeler',
+]);
+
+function normalizePedalCategory(input?: string | null): string {
+  const category = (input ?? '').toLowerCase().trim();
+  if (PEDAL_CATEGORY_SET.has(category)) return category;
+  if (category.includes('fuzz') || category.includes('drive') || category.includes('distort')) return 'drive';
+  if (category.includes('compress')) return 'compressor';
+  if (category.includes('eq')) return 'eq';
+  if (category.includes('delay') || category.includes('echo')) return 'delay';
+  if (category.includes('reverb')) return 'reverb';
+  if (category.includes('chorus') || category.includes('phaser') || category.includes('flanger') || category.includes('modulat')) return 'modulation';
+  if (category.includes('loop')) return 'looper';
+  if (category.includes('pitch') || category.includes('octave')) return 'pitch';
+  if (category.includes('ambient')) return 'ambient';
+  if (category.includes('synth')) return 'synth';
+  if (category.includes('multi')) return 'multifx';
+  if (category.includes('model')) return 'modeler';
+  return 'other';
+}
 
 export const useStore = create<Store>((set, get) => ({
   // ─── Auth ───────────────────────────────────────────────────────────────────
@@ -82,19 +155,9 @@ export const useStore = create<Store>((set, get) => ({
 
   setSession: (session) => {
     const prevUserId = get().session?.user?.id;
-    set({ session });
-    if (session) {
-      // Only kick off data fetches when the user actually changes (new sign-in).
-      // Token refreshes and other auth events reuse the same user — skip redundant fetches
-      // that can race each other and temporarily blank the collection.
-      if (prevUserId !== session.user.id) {
-        get().fetchProfile();
-        get().fetchPedals();
-        get().fetchBoards();
-      }
-    } else {
-      // Clear all user data on sign out
+    const clearSignedOutState = () => {
       set({
+        session: null,
         profile: null,
         ownedPedals: [],
         wishlistPedals: [],
@@ -108,8 +171,73 @@ export const useStore = create<Store>((set, get) => ({
         boards: [],
         lastCustomShopPick: null,
         milestoneToShow: null,
+        valueMilestoneToShow: null,
       });
       AsyncStorage.removeItem('tpc_user_image_cache').catch(() => {});
+    };
+
+    // Guard against transient null-session churn (Expo Go / token refresh races).
+    // If SDK still has a user session, ignore this null transition.
+    if (!session && prevUserId) {
+      // In Expo Go specifically, ignore automatic null-session churn unless this
+      // was an explicit user sign-out action from inside the app.
+      if (IS_EXPO_GO && !explicitSignOutInProgress) {
+        if (__DEV__) {
+          console.warn('[AuthGuard] Ignoring setSession(null) in Expo Go (not explicit sign-out)', {
+            prevUserId,
+          });
+        }
+        return;
+      }
+
+      supabase.auth.getSession()
+        .then(({ data: { session: latestSession } }) => {
+          if (latestSession?.user?.id === prevUserId) {
+            if (__DEV__) {
+              console.warn('[AuthGuard] Ignoring setSession(null); session still present', {
+                prevUserId,
+              });
+            }
+            return;
+          }
+          clearSignedOutState();
+        })
+        .catch(() => {
+          clearSignedOutState();
+        });
+      return;
+    }
+
+    if (__DEV__ && AUTH_TRACE) {
+      const nextUserId = session?.user?.id ?? null;
+      console.warn('[AuthTrace] setSession', {
+        prevUserId,
+        nextUserId,
+        changed: prevUserId !== nextUserId,
+      });
+      if (!session) {
+        const trace = new Error('[AuthTrace] setSession(null)').stack
+          ?.split('\n')
+          .slice(0, 6)
+          .join('\n');
+        if (trace) console.warn(trace);
+      }
+    }
+    set({ session });
+    if (session) {
+      // Only kick off data fetches when the user actually changes (new sign-in).
+      // Token refreshes and other auth events reuse the same user — skip redundant fetches
+      // that can race each other and temporarily blank the collection.
+      if (prevUserId !== session.user.id) {
+        // Fire all three in parallel — they're independent queries
+        void Promise.all([
+          get().fetchProfile(),
+          get().fetchPedals(),
+          get().fetchBoards(),
+        ]);
+      }
+    } else {
+      clearSignedOutState();
     }
   },
 
@@ -140,7 +268,7 @@ export const useStore = create<Store>((set, get) => ({
 
     set({ weeklyPickLoading: true });
     try {
-      const { data, error } = await invokeEdgeFunction('weekly-pick', {});
+      const { data, error } = await invokeEdgeFunction<WeeklyPickResponse>('weekly-pick', {});
       if (error || !data?.brand) {
         if (__DEV__) {
           const ctx = (error as { context?: { status?: number; text?: () => Promise<string> } } | null)?.context;
@@ -167,12 +295,14 @@ export const useStore = create<Store>((set, get) => ({
   lastCustomShopPick: null,
   setLastCustomShopPick: (pick) => {
     set({ lastCustomShopPick: pick });
-    AsyncStorage.setItem('tpc_last_custom_shop_pick', JSON.stringify(pick)).catch(() => {});
+    SecureStorageAdapter.setItem('tpc_last_custom_shop_pick', JSON.stringify(pick)).catch(() => {});
   },
 
   // ─── Milestone ───────────────────────────────────────────────────────────────
   milestoneToShow: null,
   clearMilestone: () => set({ milestoneToShow: null }),
+  valueMilestoneToShow: null,
+  clearValueMilestone: () => set({ valueMilestoneToShow: null }),
 
   // ─── Profile ────────────────────────────────────────────────────────────────
   profile: null,
@@ -180,18 +310,19 @@ export const useStore = create<Store>((set, get) => ({
   fetchProfile: async () => {
     const { session } = get();
     if (!session?.user) return;
-    const profileCacheKey = `tpc_profile_cache_${session.user.id}`;
+    const userId = session.user.id;
+    const profileCacheKey = `tpc_profile_cache_${userId}`;
 
     const { data, error } = await supabase
       .from('user_profiles')
       .select('*')
-      .eq('id', session.user.id)
+      .eq('id', userId)
       .maybeSingle();
 
     if (error) {
       if (__DEV__) console.warn('[Store] fetchProfile error:', error.message);
       try {
-        const cached = await AsyncStorage.getItem(profileCacheKey);
+        const cached = await SecureStorageAdapter.getItem(profileCacheKey);
         if (cached) {
           set({ profile: JSON.parse(cached) as UserProfile });
           return;
@@ -199,15 +330,44 @@ export const useStore = create<Store>((set, get) => ({
       } catch {}
       return;
     }
+    if (get().session?.user?.id !== userId) return;
+
     if (data) {
       set({ profile: data as UserProfile });
-      AsyncStorage.setItem(profileCacheKey, JSON.stringify(data)).catch(() => {});
+      SecureStorageAdapter.setItem(profileCacheKey, JSON.stringify(data)).catch(() => {});
     } else {
+      // Attempt to self-heal a missing profile row. If RLS rejects this insert,
+      // we still continue with a local fallback profile.
+      await supabase
+        .from('user_profiles')
+        .upsert(
+          {
+            id: userId,
+            display_name:
+              (session.user.user_metadata?.full_name as string | undefined)
+              ?? (session.user.user_metadata?.name as string | undefined)
+              ?? session.user.email?.split('@')[0]
+              ?? null,
+          },
+          { onConflict: 'id' }
+        );
+
+      const { data: created } = await supabase
+        .from('user_profiles')
+        .select('*')
+        .eq('id', userId)
+        .maybeSingle();
+      if (created && get().session?.user?.id === userId) {
+        set({ profile: created as UserProfile });
+        SecureStorageAdapter.setItem(profileCacheKey, JSON.stringify(created)).catch(() => {});
+        return;
+      }
+
       // Keep app stable even if user_profiles row is temporarily missing.
       // DB should still be backfilled, but this prevents UI/gating crashes.
       set({
         profile: {
-          id: session.user.id,
+          id: userId,
           username: null,
           display_name:
             (session.user.user_metadata?.full_name as string | undefined)
@@ -223,7 +383,7 @@ export const useStore = create<Store>((set, get) => ({
         } as UserProfile,
       });
       try {
-        const cached = await AsyncStorage.getItem(profileCacheKey);
+        const cached = await SecureStorageAdapter.getItem(profileCacheKey);
         if (cached) {
           set({ profile: JSON.parse(cached) as UserProfile });
         }
@@ -235,6 +395,7 @@ export const useStore = create<Store>((set, get) => ({
   ownedPedals: [],
   wishlistPedals: [],
   retiredPedals: [],
+  listedPedals: [],
   totalInvested: 0,
   marketValues: {},
   totalMarketValue: 0,
@@ -268,6 +429,7 @@ export const useStore = create<Store>((set, get) => ({
         ownedPedals: owned,
         wishlistPedals: data.filter(p => p.status === 'wishlist') as UserPedal[],
         retiredPedals: data.filter(p => p.status === 'retired') as UserPedal[],
+        listedPedals: owned.filter(p => p.listing_status != null),
         totalInvested,
       });
       get().refreshUserImages(data as UserPedal[]);
@@ -285,6 +447,9 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   fetchMarketValues: async () => {
+    if (marketValuesRefreshInFlight) return;
+    marketValuesRefreshInFlight = true;
+    try {
     const { session, ownedPedals, wishlistPedals } = get();
     if (!session?.user || (ownedPedals.length === 0 && wishlistPedals.length === 0)) return;
 
@@ -301,7 +466,7 @@ export const useStore = create<Store>((set, get) => ({
     const valueMap: Record<string, number> = {};
     const staleIds: string[] = [];
 
-    for (const up of ownedPedals) {
+    for (const up of allTracked) {
       const hit = cachedMap.get(up.pedal_id);
       if (hit?.market_value) {
         valueMap[up.pedal_id] = hit.market_value;
@@ -320,9 +485,11 @@ export const useStore = create<Store>((set, get) => ({
         return mkt != null && target != null && mkt <= target;
       }).length;
     };
+    const calcOwnedTotal = (vals: Record<string, number>) =>
+      get().ownedPedals.reduce((sum, up) => sum + (vals[up.pedal_id] ?? 0), 0);
 
     // Update UI immediately with cached values
-    const initialTotal = Object.values(valueMap).reduce((a, b) => a + b, 0);
+    const initialTotal = calcOwnedTotal(valueMap);
     set({
       marketValues: { ...valueMap },
       totalMarketValue: initialTotal,
@@ -333,7 +500,7 @@ export const useStore = create<Store>((set, get) => ({
     for (const up of allTracked.filter(p => staleIds.includes(p.pedal_id))) {
       if (!up.pedal) continue;
       try {
-        const { data } = await invokeEdgeFunction('market-value', {
+        const { data } = await invokeEdgeFunction<MarketValueResponse>('market-value', {
           pedal_id: up.pedal_id,
           brand: up.pedal.brand,
           model: up.pedal.model,
@@ -341,15 +508,25 @@ export const useStore = create<Store>((set, get) => ({
         if (data?.market_value) {
           const { marketValues: current } = get();
           const updated = { ...current, [up.pedal_id]: data.market_value };
+          const newTotal = calcOwnedTotal(updated);
           set({
             marketValues: updated,
-            totalMarketValue: Object.values(updated).reduce((a, b) => a + b, 0),
+            totalMarketValue: newTotal,
             wishlistDropCount: calcWishlistDrops(updated),
           });
+          // Check for vault value milestones (non-blocking)
+          import('../lib/subscription').then(({ checkValueMilestone }) => {
+            checkValueMilestone(newTotal).then(ms => {
+              if (ms !== null) set({ valueMilestoneToShow: ms });
+            });
+          }).catch(() => {});
         }
       } catch {
         // Market data is non-critical — fail silently
       }
+    }
+    } finally {
+      marketValuesRefreshInFlight = false;
     }
   },
 
@@ -449,43 +626,64 @@ export const useStore = create<Store>((set, get) => ({
   // ─── Image Enrichment ────────────────────────────────────────────────────────
 
   enrichMissingImages: async () => {
+    if (imageEnrichmentInFlight) return;
+    imageEnrichmentInFlight = true;
+    try {
     const { session, ownedPedals, wishlistPedals, retiredPedals } = get();
     if (!session?.user) return;
 
-    // Collect unique pedals without an image (limit to 8 per run to avoid hammering Reverb)
+    // Collect pedals that need enrichment:
+    //   Priority 1 — no image at all
+    //   Priority 2 — image exists but came from a raw reverb_listing (low quality)
+    // Limit to 6 per run to stay within Reverb rate limits.
     const seen = new Set<string>();
-    const missing: { id: string; brand: string; model: string }[] = [];
+    const needsImage:   { id: string; brand: string; model: string }[] = [];
+    const needsUpgrade: { id: string; brand: string; model: string }[] = [];
+
     for (const up of [...ownedPedals, ...wishlistPedals, ...retiredPedals]) {
-      if (up.pedal && !up.pedal.image_url && !seen.has(up.pedal.id)) {
-        seen.add(up.pedal.id);
-        missing.push({ id: up.pedal.id, brand: up.pedal.brand, model: up.pedal.model });
+      const p = up.pedal;
+      if (!p || seen.has(p.id)) continue;
+      seen.add(p.id);
+      if (!p.image_url) {
+        needsImage.push({ id: p.id, brand: p.brand, model: p.model });
+      } else if (p.image_source === 'reverb_listing' || p.image_source == null) {
+        needsUpgrade.push({ id: p.id, brand: p.brand, model: p.model });
       }
     }
 
-    for (const p of missing.slice(0, 8)) {
+    // Process: no-image pedals first, then low-quality upgrades
+    const queue = [...needsImage, ...needsUpgrade].slice(0, 6);
+
+    for (const p of queue) {
       try {
-        const { data } = await invokeEdgeFunction('search-pedals', {
-          query: `${p.brand} ${p.model}`,
+        const { data } = await invokeEdgeFunction('pedal-image', {
+          pedal_id: p.id,
+          brand:    p.brand,
+          model:    p.model,
         });
-        const photoUrl: string | undefined = (data?.results as { photo_url?: string }[])?.[0]?.photo_url;
-        if (!photoUrl) continue;
 
-        // Persist to DB
-        await supabase.from('pedals').update({ image_url: photoUrl }).eq('id', p.id);
+        const imageUrl: string | null = (data as { image_url?: string | null })?.image_url ?? null;
+        const imageSource = (data as { image_source?: string | null })?.image_source ?? null;
+        if (!imageUrl) continue;
 
-        // Update all three lists in local state
+        // Patch all three lists in local state
         const patch = (list: UserPedal[]) =>
           list.map(up =>
-            up.pedal?.id === p.id ? { ...up, pedal: { ...up.pedal!, image_url: photoUrl } } : up
+            up.pedal?.id === p.id
+              ? { ...up, pedal: { ...up.pedal!, image_url: imageUrl, image_source: imageSource as Pedal['image_source'] } }
+              : up
           );
         set(s => ({
-          ownedPedals: patch(s.ownedPedals),
+          ownedPedals:    patch(s.ownedPedals),
           wishlistPedals: patch(s.wishlistPedals),
-          retiredPedals: patch(s.retiredPedals),
+          retiredPedals:  patch(s.retiredPedals),
         }));
       } catch {
         // Non-critical — skip silently
       }
+    }
+    } finally {
+      imageEnrichmentInFlight = false;
     }
   },
 
@@ -496,6 +694,7 @@ export const useStore = create<Store>((set, get) => ({
     if (!session?.user) return 'error';
 
     let pedalId: string | null = null;
+    let resolvedTargetPrice: number | null = catalogData?.price ?? null;
 
     const findExistingPedalId = async (): Promise<string | null> => {
       const { data: pedals } = await supabase
@@ -522,36 +721,84 @@ export const useStore = create<Store>((set, get) => ({
         .ilike('brand', `%${brand.trim()}%`)
         .ilike('model', `%${simplifiedModel}%`)
         .limit(1);
+      if (fuzzy?.[0]?.id) return fuzzy[0].id;
 
-      return fuzzy?.[0]?.id ?? null;
+      // Token fallback: catch catalog model aliases like
+      // "Boss MD-500" vs "Boss MD-500 Modulation Processor".
+      const modelTokens = (model.toLowerCase().match(/[a-z0-9]+(?:-[a-z0-9]+)*/g) ?? [])
+        .filter((t) => t.length >= 3)
+        .filter((t) => !['pedal', 'effects', 'effect', 'processor', 'modulation', 'delay', 'reverb'].includes(t));
+
+      const strongestToken =
+        modelTokens.find((t) => /\d/.test(t)) ??
+        modelTokens[0] ??
+        null;
+
+      if (strongestToken) {
+        const { data: tokenMatch } = await supabase
+          .from('pedals')
+          .select('id')
+          .ilike('brand', `%${brand.trim()}%`)
+          .ilike('model', `%${strongestToken}%`)
+          .limit(1);
+        if (tokenMatch?.[0]?.id) return tokenMatch[0].id;
+      }
+
+      return null;
+    };
+
+    const logEdgeError = async (label: string, err: unknown) => {
+      if (!__DEV__) return;
+      try {
+        const anyErr = err as {
+          message?: string;
+          context?: { status?: number; text?: () => Promise<string> };
+        } | null;
+        const status = anyErr?.context?.status;
+        let body = '';
+        if (anyErr?.context?.text) {
+          try { body = await anyErr.context.text(); } catch {}
+        }
+        console.warn(label, {
+          message: String(anyErr?.message ?? err),
+          status,
+          body,
+        });
+      } catch {
+        console.warn(label, err);
+      }
     };
 
     // Auto-upsert via edge function (also enriches image_url)
     if (catalogData) {
-      const { data, error } = await invokeEdgeFunction('search-pedals', {
+      const normalizedCategory = normalizePedalCategory(catalogData.category);
+      const { data, error } = await invokeEdgeFunction<SearchPedalsUpsertResponse>('search-pedals', {
         action: 'upsert',
         brand,
         model,
-        category: catalogData.category,
-        subcategory: catalogData.subcategory,
-        description: catalogData.description,
+        category: normalizedCategory,
+        subcategory: catalogData.subcategory || 'Recommended',
+        description: catalogData.description || null,
         analog: catalogData.analog,
         avg_price: catalogData.price,
         in_production: true,
       });
       if (!error && data?.pedal?.id) {
         pedalId = data.pedal.id as string;
+        if (resolvedTargetPrice == null && typeof data.pedal.avg_price === 'number') {
+          resolvedTargetPrice = data.pedal.avg_price;
+        }
       } else {
-        if (__DEV__) console.warn('[Store] addToWishlist upsert error (catalogData):', error);
+        await logEdgeError('[Store] addToWishlist upsert error (catalogData):', error);
         // Fallback 1: existing row lookup
         pedalId = await findExistingPedalId();
         // Fallback 2: service-role upsert with minimal metadata
         if (!pedalId) {
-          const { data: retryData, error: retryErr } = await invokeEdgeFunction('search-pedals', {
+          const { data: retryData, error: retryErr } = await invokeEdgeFunction<SearchPedalsUpsertResponse>('search-pedals', {
             action: 'upsert',
             brand,
             model,
-            category: catalogData.category || 'other',
+            category: normalizedCategory,
             subcategory: catalogData.subcategory || 'Recommended',
             description: catalogData.description || null,
             analog: catalogData.analog ?? false,
@@ -560,8 +807,11 @@ export const useStore = create<Store>((set, get) => ({
           });
           if (!retryErr && retryData?.pedal?.id) {
             pedalId = retryData.pedal.id as string;
+            if (resolvedTargetPrice == null && typeof retryData.pedal.avg_price === 'number') {
+              resolvedTargetPrice = retryData.pedal.avg_price;
+            }
           } else {
-            if (__DEV__) console.warn('[Store] addToWishlist retry upsert error:', retryErr);
+            await logEdgeError('[Store] addToWishlist retry upsert error:', retryErr);
             pedalId = await findExistingPedalId();
           }
         }
@@ -572,7 +822,7 @@ export const useStore = create<Store>((set, get) => ({
       if (!pedalId) {
         // Weekly picks and advisor suggestions can reference pedals not yet in our catalog.
         // Create a minimal catalog row on-demand so wishlist add always works.
-        const { data, error } = await invokeEdgeFunction('search-pedals', {
+        const { data, error } = await invokeEdgeFunction<SearchPedalsUpsertResponse>('search-pedals', {
           action: 'upsert',
           brand,
           model,
@@ -584,16 +834,32 @@ export const useStore = create<Store>((set, get) => ({
           in_production: true,
         });
         if (error || !data?.pedal?.id) {
-          if (__DEV__) console.warn('[Store] addToWishlist upsert error (no catalogData):', error);
+          await logEdgeError('[Store] addToWishlist upsert error (no catalogData):', error);
           // One more try with fuzzy lookup before giving up
           pedalId = await findExistingPedalId();
           if (!pedalId) return 'not_found';
         } else {
           pedalId = data.pedal.id as string;
+          if (resolvedTargetPrice == null && typeof data.pedal.avg_price === 'number') {
+            resolvedTargetPrice = data.pedal.avg_price;
+          }
         }
       }
     }
     if (!pedalId) return 'error';
+
+    // If the caller didn't provide a target price, try to use catalog avg_price.
+    // This keeps weekly-pick -> wishlist resilient if DB constraints require a price.
+    if (resolvedTargetPrice == null) {
+      const { data: pedalRow } = await supabase
+        .from('pedals')
+        .select('avg_price')
+        .eq('id', pedalId)
+        .maybeSingle();
+      if (typeof pedalRow?.avg_price === 'number') {
+        resolvedTargetPrice = pedalRow.avg_price;
+      }
+    }
 
     // Check if already on wishlist (or owned/retired)
     const { data: existing, error: existingError } = await supabase
@@ -610,25 +876,96 @@ export const useStore = create<Store>((set, get) => ({
     if (existing?.length) return 'exists';
 
     // Insert as wishlist — include target price from catalog if available
-    const { error } = await supabase
+    let { error } = await supabase
       .from('user_pedals')
       .insert({
         user_id: session.user.id,
         pedal_id: pedalId,
         status: 'wishlist',
-        target_price: catalogData?.price ?? null,
+        target_price: resolvedTargetPrice,
       });
 
-    if (error) return 'error';
+    // If a DB check requires target_price for wishlist and we still don't have one,
+    // retry with a minimal fallback instead of failing the weekly-pick CTA.
+    if (error && (error.message.toLowerCase().includes('target_price') || error.message.toLowerCase().includes('check'))) {
+      const fallbackTarget = Math.max(1, Math.round((resolvedTargetPrice ?? 1) * 100) / 100);
+      const retry = await supabase
+        .from('user_pedals')
+        .insert({
+          user_id: session.user.id,
+          pedal_id: pedalId,
+          status: 'wishlist',
+          target_price: fallbackTarget,
+        });
+      error = retry.error ?? null;
+    }
+
+    // If insert lost a race with another add, treat as exists instead of error.
+    if (error) {
+      if (__DEV__) console.warn('[Store] addToWishlist insert error:', error.message);
+      const { data: raceExisting } = await supabase
+        .from('user_pedals')
+        .select('id')
+        .eq('user_id', session.user.id)
+        .eq('pedal_id', pedalId)
+        .limit(1);
+      if (raceExisting?.length) return 'exists';
+      return 'error';
+    }
 
     // Refresh store
     await get().fetchPedals();
     return 'added';
   },
 
+  // ─── FS/FT Listing ──────────────────────────────────────────────────────────
+  updateListingStatus: async (userPedalId, listing) => {
+    const { error } = await supabase
+      .from('user_pedals')
+      .update(listing)
+      .eq('id', userPedalId);
+    if (error) return { error: error.message };
+    // Optimistic update
+    useStore.setState(s => {
+      const patch = (arr: UserPedal[]) =>
+        arr.map(p => p.id === userPedalId ? { ...p, ...listing } : p);
+      const nextOwned = patch(s.ownedPedals);
+      return {
+        ownedPedals: nextOwned,
+        listedPedals: nextOwned.filter(p => p.listing_status != null),
+      };
+    });
+    return { error: null };
+  },
+
+  // ─── Delete Account ─────────────────────────────────────────────────────────
+  deleteAccount: async () => {
+    const { data, error } = await invokeEdgeFunction<{ success: boolean }>('delete-account', {});
+    if (error || !data?.success) {
+      return { success: false, error: 'Could not delete account. Please try again.' };
+    }
+    // Clear local state — auth listener will fire SIGNED_OUT but we pre-clear
+    explicitSignOutInProgress = true;
+    try { await supabase.auth.signOut(); } catch { /* already deleted server-side */ }
+    finally { explicitSignOutInProgress = false; }
+    set({
+      session: null, profile: null,
+      ownedPedals: [], wishlistPedals: [], retiredPedals: [], listedPedals: [],
+      totalInvested: 0, marketValues: {}, totalMarketValue: 0,
+      userImageUrls: {}, userImageThumbUrls: {},
+      boards: [], weeklyPick: null, weeklyPickLoading: false,
+    });
+    return { success: true };
+  },
+
   // ─── Sign Out ───────────────────────────────────────────────────────────────
   signOut: async () => {
-    await supabase.auth.signOut();
+    explicitSignOutInProgress = true;
+    try {
+      await supabase.auth.signOut();
+    } finally {
+      explicitSignOutInProgress = false;
+    }
     set({
       session: null,
       profile: null,
@@ -656,7 +993,7 @@ AsyncStorage.getItem('tpc_view_mode')
   })
   .catch(() => {});
 
-AsyncStorage.getItem('tpc_last_custom_shop_pick')
+SecureStorageAdapter.getItem('tpc_last_custom_shop_pick')
   .then((raw) => {
     if (raw) useStore.setState({ lastCustomShopPick: JSON.parse(raw) });
   })

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -11,19 +11,26 @@ import {
   Animated,
   Image,
   Linking,
+  Modal,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation } from '@react-navigation/native'; // kept for future deep-link navigation
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, spacing, radius } from '../theme';
 import { useStore } from '../hooks/useStore';
 import { askClaude, Message } from '../lib/anthropic';
 import { buildSystemPrompt, STARTER_PROMPTS } from '../lib/systemPrompt';
-import { advisorGate, incrementAdvisorCount, hasBetaFullAccess } from '../lib/subscription';
+import { hasBetaFullAccess } from '../lib/subscription';
+import { useMessageGate } from '../hooks/useMessageGate';
 import { loadMemory, refreshMemory } from '../lib/memory';
 import { reverbSearchUrl } from '../lib/reverb';
+import { invokeEdgeFunction } from '../lib/supabase';
+import { shareAdvisorResponse } from '../lib/share';
+import { weeklyPickCountdownLabel } from '../lib/notifications';
 
 type ChatMessage = Message & {
   id: string;
@@ -36,15 +43,21 @@ const SURFACE_GRADIENT: [string, string] = ['#FFFFFF', '#F7F4F0'];
 export default function AdvisorScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
-  const { session, ownedPedals, wishlistPedals, retiredPedals, boards, profile, openPaywall } = useStore();
+  // Only show back button when we're not at the root of the AIStack
+  // (canGoBack() checks the whole tree and would pop back to the Home tab)
+  const { session, ownedPedals, wishlistPedals, retiredPedals, boards, profile, openPaywall, weeklyPick, weeklyPickLoading, fetchWeeklyPick, addToWishlist } = useStore();
 
   const isPro = Boolean(profile?.is_premium) || hasBetaFullAccess();
+  const { checkGate, gateState } = useMessageGate();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
   const [sessionWarning, setSessionWarning] = useState<string | null>(null);
   const [memory, setMemory] = useState('');
+  const [showWeeklyDetail, setShowWeeklyDetail] = useState(false);
+  const [weeklyWishlistState, setWeeklyWishlistState] = useState<'idle' | 'loading' | 'added' | 'exists'>('idle');
   const memoryRef = useRef('');
+  const communitySignalsRef = useRef('');
   const scrollViewRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   const dotAnim = useRef(new Animated.Value(0)).current;
@@ -56,6 +69,27 @@ export default function AdvisorScreen() {
       setMemory(m);
       memoryRef.current = m;
     });
+  }, [session?.user?.id]);
+
+  // Fetch weekly pick when screen mounts (gated inside fetchWeeklyPick for Pro)
+  useEffect(() => {
+    fetchWeeklyPick();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPro]);
+
+  // Fetch community signals on mount (non-blocking, cached for session)
+  useEffect(() => {
+    const collectionIds = ownedPedals.map(p => p.pedal_id).filter(Boolean);
+    invokeEdgeFunction<{ signals: string }>('community-signals', {
+      action: 'query',
+      collection_pedal_ids: collectionIds,
+      gap_categories: [],
+      profile_genres: profile?.pedal_expert_profile?.genres ?? [],
+      profile_guitar_type: profile?.pedal_expert_profile?.guitar_type ?? '',
+    }).then(({ data }) => {
+      communitySignalsRef.current = data?.signals ?? '';
+    }).catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.user?.id]);
 
   // Animate thinking dots
@@ -73,6 +107,27 @@ export default function AdvisorScreen() {
     }
   }, [isThinking]);
 
+  // Build system prompt once and only recompute when the user's actual data changes.
+  // buildSystemPrompt concatenates ~17KB of static knowledge — memoizing it eliminates
+  // that work on every message send.
+  const systemPrompt = useMemo(() => buildSystemPrompt(
+    ownedPedals,
+    wishlistPedals,
+    retiredPedals,
+    profile?.pedal_expert_profile ?? null,
+    boards.length,
+    memoryRef.current,
+    communitySignalsRef.current,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [
+    ownedPedals.length,
+    wishlistPedals.length,
+    retiredPedals.length,
+    boards.length,
+    profile?.pedal_expert_profile,
+    memory, // triggers re-build after memory loads from Supabase
+  ]);
+
   const scrollToBottom = useCallback((animated = true) => {
     setTimeout(() => {
       scrollViewRef.current?.scrollToEnd({ animated });
@@ -82,19 +137,23 @@ export default function AdvisorScreen() {
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || isThinking) return;
 
-    // ── Usage gate ──────────────────────────────────────────────────────────
-    const gate = await advisorGate(isPro);
-    if (!gate.allowed) {
-      openPaywall('advisor');
-      return;
+    // ── Usage gate (server-side) ─────────────────────────────────────────────
+    // Beta users bypass the server gate — they always have full access.
+    if (!hasBetaFullAccess()) {
+      const gate = await checkGate();
+      if (!gate.allowed) {
+        if (gate.error === 'pro_required') {
+          openPaywall('advisor');
+          return;
+        } else if (gate.error === 'messages_depleted') {
+          setSessionWarning("You've used all 50 messages this month and have no bonus credits left.");
+          return;
+        }
+        // network_error: fail open — don't silently block the user
+      }
     }
-    if (gate.showWarning) {
-      setSessionWarning(`Last free session this month — upgrade for unlimited access.`);
-    } else {
-      setSessionWarning(null);
-    }
-    // Increment usage count (non-blocking)
-    incrementAdvisorCount().catch(() => {});
+    // Clear any previous warning once a message goes through
+    setSessionWarning(null);
     // ────────────────────────────────────────────────────────────────────────
 
     const userMessage: ChatMessage = {
@@ -130,15 +189,6 @@ export default function AdvisorScreen() {
         isStreaming: true,
       },
     ]);
-
-    const systemPrompt = buildSystemPrompt(
-      ownedPedals,
-      wishlistPedals,
-      retiredPedals,
-      profile?.pedal_expert_profile ?? null,
-      boards.length,
-      memoryRef.current,
-    );
 
     await askClaude(history, systemPrompt, (chunk) => {
       if (chunk.type === 'text' && chunk.text) {
@@ -184,7 +234,7 @@ export default function AdvisorScreen() {
         );
         setIsThinking(false);
       }
-    }, { enableWebSearch: true, maxTokens: 1400 });
+    }, { enableWebSearch: isPro, maxTokens: 1400 });
   }, [messages, isThinking, ownedPedals, wishlistPedals, retiredPedals, profile, boards, isPro, openPaywall, scrollToBottom, session]);
 
   const handleStarterPrompt = (prompt: string) => {
@@ -197,6 +247,7 @@ export default function AdvisorScreen() {
   );
 
   return (
+    <>
     <KeyboardAvoidingView
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -208,24 +259,14 @@ export default function AdvisorScreen() {
         style={[styles.header, { paddingTop: insets.top + 12 }]}
       >
         <View style={styles.headerInner}>
-          {/* Back to AI Hub */}
-          {navigation.canGoBack() && (
-            <TouchableOpacity
-              onPress={() => { Haptics.selectionAsync(); navigation.goBack(); }}
-              style={styles.headerBackBtn}
-              activeOpacity={0.7}
-            >
-              <Ionicons name="chevron-back" size={22} color={colors.textSecondary} />
-            </TouchableOpacity>
-          )}
           <View style={styles.advisorIcon}>
             <LinearGradient colors={TEAL_GRADIENT} style={styles.advisorIconGradient}>
-              <Text style={styles.advisorIconEmoji}>🎛</Text>
+              <Ionicons name="sparkles" size={22} color="#fff" />
             </LinearGradient>
             <View style={styles.onlineDot} />
           </View>
           <View style={styles.headerText}>
-            <Text style={styles.headerTitle}>TPC Advisor</Text>
+            <Text style={styles.headerTitle}>TPC.ai</Text>
             <Text style={styles.headerSub}>
               Powered by Claude · Knows your collection
             </Text>
@@ -235,10 +276,22 @@ export default function AdvisorScreen() {
         {/* Collection context pill */}
         <View style={styles.contextPill}>
           <Text style={styles.contextPillText}>
-            🎸 {ownedPedals.length} owned · {wishlistPedals.length} wishlist{profile?.pedal_expert_profile?.onboarding_completed_at ? ' · tone profile active' : ''}
+            {ownedPedals.length} owned · {wishlistPedals.length} GAS list{profile?.pedal_expert_profile?.onboarding_completed_at ? ' · tone profile ✓' : ''} · community data ✓
           </Text>
         </View>
       </LinearGradient>
+
+      {/* Message counter — shown once user has sent at least one message */}
+      {isPro && !hasBetaFullAccess() && gateState && (
+        <View style={styles.counterBar}>
+          <Ionicons name="chatbubble-ellipses-outline" size={12} color={colors.textMuted} />
+          <Text style={styles.counterText}>
+            {gateState.onCredits
+              ? `Monthly limit reached · ${gateState.credits} bonus credit${gateState.credits !== 1 ? 's' : ''} remaining`
+              : `${gateState.used} of ${gateState.allotment} messages this month${gateState.credits > 0 ? ` · +${gateState.credits} bonus` : ''}`}
+          </Text>
+        </View>
+      )}
 
       {/* Usage warning banner */}
       {sessionWarning && (
@@ -249,7 +302,7 @@ export default function AdvisorScreen() {
         >
           <Ionicons name="sparkles-outline" size={14} color={colors.gold} />
           <Text style={styles.warningText}>{sessionWarning}</Text>
-          <Text style={styles.warningCTA}>Upgrade →</Text>
+          <Text style={styles.warningCTA}>Get more →</Text>
         </TouchableOpacity>
       )}
 
@@ -268,12 +321,30 @@ export default function AdvisorScreen() {
           <EmptyState
             ownedCount={ownedPedals.length}
             onPromptPress={handleStarterPrompt}
+            isPro={isPro}
+            weeklyPick={weeklyPick}
+            weeklyPickLoading={weeklyPickLoading}
+            onWeeklyPickTap={() => { setWeeklyWishlistState('idle'); setShowWeeklyDetail(true); }}
+            onCustomShopTap={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); (navigation as any).navigate('Finder'); }}
+            onOpenPaywall={() => openPaywall('weekly_pick')}
           />
         ) : (
           <>
-            {messages.map(message => (
-              <MessageBubble key={message.id} message={message} />
-            ))}
+            {messages.map((message, idx) => {
+              const isLastMsg = idx === messages.length - 1;
+              const isLastCompleted =
+                isLastMsg &&
+                message.role === 'assistant' &&
+                !message.isStreaming &&
+                message.content.trim().length > 0;
+              return (
+                <MessageBubble
+                  key={message.id}
+                  message={message}
+                  showShare={isLastCompleted}
+                />
+              );
+            })}
             {isThinking && !hasStreamingAssistantWithText && <ThinkingIndicator dotAnim={dotAnim} />}
           </>
         )}
@@ -287,7 +358,7 @@ export default function AdvisorScreen() {
             style={styles.input}
             value={input}
             onChangeText={setInput}
-            placeholder="Ask about pedals, genres, your board..."
+            placeholder="Ask about tone, a song, your board..."
             placeholderTextColor={colors.textMuted}
             multiline
             maxLength={500}
@@ -310,18 +381,109 @@ export default function AdvisorScreen() {
           </TouchableOpacity>
         </View>
         <Text style={styles.inputDisclaimer}>
-          TPC Advisor · Knows your collection, wishlist, and tone profile
+          TPC.ai · Knows your collection, GAS list, and tone profile
         </Text>
       </View>
     </KeyboardAvoidingView>
+
+    {/* ── Weekly Pick detail sheet ── */}
+    {weeklyPick && (
+      <Modal
+        visible={showWeeklyDetail}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowWeeklyDetail(false)}
+      >
+        <View style={styles.detailOverlay}>
+          <TouchableOpacity style={styles.detailBackdrop} activeOpacity={1} onPress={() => setShowWeeklyDetail(false)} />
+          <View style={[styles.detailSheet, { paddingBottom: insets.bottom + 24 }]}>
+            <View style={styles.detailHandle} />
+            <View style={styles.detailHeader}>
+              <View style={styles.detailTitleRow}>
+                <Ionicons name="sparkles" size={15} color={colors.gold} />
+                <Text style={styles.detailTitle}>This Week's Pick</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowWeeklyDetail(false)} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
+                <Ionicons name="close" size={20} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.detailPedal}>{weeklyPick.brand} {weeklyPick.model}</Text>
+            {weeklyPick.category && (
+              <Text style={styles.detailCategory}>{weeklyPick.category}</Text>
+            )}
+            <Text style={styles.detailCountdown}>{weeklyPickCountdownLabel()}</Text>
+            <Text style={styles.detailWhyLabel}>Why this pedal?</Text>
+            <Text style={styles.detailWhy}>{weeklyPick.why}</Text>
+            <View style={styles.detailActions}>
+              <TouchableOpacity
+                style={styles.detailBtnReverb}
+                activeOpacity={0.8}
+                onPress={() => Linking.openURL(reverbSearchUrl(`${weeklyPick.brand} ${weeklyPick.model}`))}
+              >
+                <Ionicons name="storefront-outline" size={16} color="#fff" />
+                <Text style={styles.detailBtnReverbText}>See on Reverb</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.detailBtnWishlist, weeklyWishlistState !== 'idle' && styles.detailBtnWishlistDone]}
+                activeOpacity={0.8}
+                disabled={weeklyWishlistState !== 'idle'}
+                onPress={async () => {
+                  setWeeklyWishlistState('loading');
+                  const result = await addToWishlist(weeklyPick.brand, weeklyPick.model, {
+                    category: weeklyPick.category ?? 'other',
+                    subcategory: 'Weekly Pick',
+                    description: weeklyPick.why ?? '',
+                    analog: false,
+                    price: null,
+                  });
+                  if (result === 'added') {
+                    setWeeklyWishlistState('added');
+                  } else if (result === 'exists') {
+                    setWeeklyWishlistState('exists');
+                  } else if (result === 'not_found') {
+                    setWeeklyWishlistState('idle');
+                    Alert.alert('Not in catalog yet', 'Could not add this pick right now. Please try again in a moment.');
+                  } else {
+                    setWeeklyWishlistState('idle');
+                    Alert.alert('Could not add', 'Please try again in a moment.');
+                  }
+                }}
+              >
+                {weeklyWishlistState === 'loading' ? (
+                  <ActivityIndicator size="small" color={colors.teal} />
+                ) : weeklyWishlistState === 'added' ? (
+                  <>
+                    <Ionicons name="checkmark-circle" size={16} color={colors.teal} />
+                    <Text style={styles.detailBtnWishlistText}>Added to Wishlist</Text>
+                  </>
+                ) : weeklyWishlistState === 'exists' ? (
+                  <>
+                    <Ionicons name="checkmark-circle" size={16} color={colors.textMuted} />
+                    <Text style={[styles.detailBtnWishlistText, { color: colors.textMuted }]}>Already on Wishlist</Text>
+                  </>
+                ) : (
+                  <>
+                    <Ionicons name="bookmark-outline" size={16} color={colors.teal} />
+                    <Text style={styles.detailBtnWishlistText}>Add to Wishlist</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    )}
+    </>
   );
 }
 
 // ─── Message Bubble ───────────────────────────────────────────────────────────
 function MessageBubble({
-  message
+  message,
+  showShare = false,
 }: {
   message: ChatMessage;
+  showShare?: boolean;
 }) {
   const isUser = message.role === 'user';
   const isEmptyStreamingAssistant =
@@ -340,17 +502,32 @@ function MessageBubble({
           <Image source={require('../../assets/tpc-square.png')} style={styles.bubbleAvatarImage} />
         </View>
       )}
-      <View
-        style={[
-          styles.bubble,
-          isUser ? styles.bubbleUser : styles.bubbleAssistant,
-          message.isStreaming && styles.bubbleStreaming,
-        ]}
-      >
-        {isUser ? (
-          <Text style={styles.bubbleTextUser}>{message.content}</Text>
-        ) : (
-          <FormattedText text={message.content} isStreaming={message.isStreaming} />
+      <View style={styles.bubbleWithShare}>
+        <View
+          style={[
+            styles.bubble,
+            isUser ? styles.bubbleUser : styles.bubbleAssistant,
+            message.isStreaming && styles.bubbleStreaming,
+          ]}
+        >
+          {isUser ? (
+            <Text style={styles.bubbleTextUser}>{message.content}</Text>
+          ) : (
+            <FormattedText text={message.content} isStreaming={message.isStreaming} />
+          )}
+        </View>
+        {showShare && (
+          <TouchableOpacity
+            style={styles.bubbleShareBtn}
+            onPress={() => {
+              Haptics.selectionAsync();
+              shareAdvisorResponse(message.content);
+            }}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="share-outline" size={13} color={colors.textMuted} />
+            <Text style={styles.bubbleShareText}>Share this</Text>
+          </TouchableOpacity>
         )}
       </View>
     </View>
@@ -446,20 +623,124 @@ function TypingDots({
 function EmptyState({
   ownedCount,
   onPromptPress,
+  isPro,
+  weeklyPick,
+  weeklyPickLoading,
+  onWeeklyPickTap,
+  onCustomShopTap,
+  onOpenPaywall,
 }: {
   ownedCount: number;
   onPromptPress: (p: string) => void;
+  isPro: boolean;
+  weeklyPick: { brand: string; model: string; why: string; category: string | null; weekKey: string } | null;
+  weeklyPickLoading: boolean;
+  onWeeklyPickTap: () => void;
+  onCustomShopTap: () => void;
+  onOpenPaywall: () => void;
 }) {
-  // Shuffle and pick 4 prompts
-  const prompts = [...STARTER_PROMPTS].sort(() => Math.random() - 0.5).slice(0, 4);
+  // Shuffle once on mount — useMemo prevents reshuffling on every re-render
+  const prompts = useMemo(
+    () => [...STARTER_PROMPTS].sort(() => Math.random() - 0.5).slice(0, 6),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
 
   return (
     <View style={styles.emptyState}>
+      {/* Shortcut cards — Weekly Pick + Custom Shop */}
+      <View style={styles.shortcutRow}>
+        {/* Weekly Pick */}
+        <TouchableOpacity
+          style={styles.shortcutCard}
+          activeOpacity={0.88}
+          onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); isPro ? onWeeklyPickTap() : onOpenPaywall(); }}
+        >
+          <LinearGradient
+            colors={isPro && weeklyPick ? [colors.gold, colors.goldDark] : ['#2C1F08', '#1A1200']}
+            style={styles.shortcutCardInner}
+          >
+            {/* Top: badge */}
+            <View style={styles.shortcutBadgeRow}>
+              <View style={styles.shortcutBadge}>
+                <Text style={styles.shortcutBadgeText}>✦ WEEKLY PICK</Text>
+              </View>
+              {!isPro && (
+                <View style={styles.shortcutLockChip}>
+                  <Ionicons name="lock-closed" size={8} color={colors.gold} />
+                  <Text style={styles.shortcutLockChipText}>PRO</Text>
+                </View>
+              )}
+            </View>
+
+            {/* Middle: content */}
+            <View style={styles.shortcutContent}>
+              {!isPro ? (
+                <>
+                  <View style={[styles.shortcutIconCircle, styles.shortcutIconCircleGold]}>
+                    <Ionicons name="sparkles" size={18} color={colors.gold} />
+                  </View>
+                  <Text style={styles.shortcutLockedTitle}>Your pick{'\n'}is ready</Text>
+                </>
+              ) : weeklyPickLoading && !weeklyPick ? (
+                <>
+                  <View style={[styles.shortcutIconCircle, styles.shortcutIconCircleWhite]}>
+                    <ActivityIndicator size="small" color="rgba(255,255,255,0.8)" />
+                  </View>
+                  <Text style={styles.shortcutLoadingText}>Finding{'\n'}this week's…</Text>
+                </>
+              ) : weeklyPick ? (
+                <>
+                  <Text style={styles.shortcutPickBrand} numberOfLines={1}>{weeklyPick.brand}</Text>
+                  <Text style={styles.shortcutPickModel} numberOfLines={2}>{weeklyPick.model}</Text>
+                </>
+              ) : null}
+            </View>
+
+            {/* Bottom: CTA */}
+            <View style={styles.shortcutCtaRow}>
+              <Text style={styles.shortcutCta}>{isPro && weeklyPick ? 'Open' : isPro ? 'View' : 'Unlock Pro'}</Text>
+              <Ionicons name="arrow-forward" size={11} color="rgba(255,255,255,0.7)" />
+            </View>
+          </LinearGradient>
+        </TouchableOpacity>
+
+        {/* Custom Shop */}
+        <TouchableOpacity
+          style={styles.shortcutCard}
+          activeOpacity={0.88}
+          onPress={onCustomShopTap}
+        >
+          <LinearGradient colors={[colors.teal, colors.tealDark]} style={styles.shortcutCardInner}>
+            {/* Top: badge */}
+            <View style={styles.shortcutBadgeRow}>
+              <View style={styles.shortcutBadge}>
+                <Text style={styles.shortcutBadgeText}>✦ CUSTOM SHOP</Text>
+              </View>
+            </View>
+
+            {/* Middle: content */}
+            <View style={styles.shortcutContent}>
+              <View style={[styles.shortcutIconCircle, styles.shortcutIconCircleWhite]}>
+                <Ionicons name="flame" size={18} color="#fff" />
+              </View>
+              <Text style={styles.shortcutShopTitle}>Feed Your{'\n'}GAS</Text>
+            </View>
+
+            {/* Bottom: CTA */}
+            <View style={styles.shortcutCtaRow}>
+              <Text style={styles.shortcutCta}>Get my pick</Text>
+              <Ionicons name="arrow-forward" size={11} color="rgba(255,255,255,0.7)" />
+            </View>
+          </LinearGradient>
+        </TouchableOpacity>
+      </View>
+
       {/* Hero */}
       <LinearGradient colors={['#3D5261', '#2A3E4E']} style={styles.emptyHero}>
         <View style={styles.emptyIconRing}>
           <LinearGradient colors={TEAL_GRADIENT} style={styles.emptyIconGradient}>
-            <Text style={styles.emptyIcon}>🎛</Text>
+            <Ionicons name="chatbubble-ellipses" size={24} color="#fff" />
           </LinearGradient>
         </View>
         <Text style={styles.emptyTitle}>TPC Advisor</Text>
@@ -468,8 +749,9 @@ function EmptyState({
         </Text>
         {ownedCount === 0 && (
           <View style={styles.emptyHint}>
+            <Ionicons name="information-circle-outline" size={14} color={colors.warning} style={{ marginTop: 1 }} />
             <Text style={styles.emptyHintText}>
-              💡 Add pedals to your collection first and I'll give you smarter recommendations
+              Add pedals to your collection first and I'll give you smarter recommendations
             </Text>
           </View>
         )}
@@ -477,11 +759,7 @@ function EmptyState({
 
       {/* Starter prompts */}
       <Text style={styles.starterLabel}>Try asking...</Text>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.starterRow}
-      >
+      <View style={styles.starterRow}>
         {prompts.map((prompt, i) => (
           <TouchableOpacity
             key={i}
@@ -492,43 +770,8 @@ function EmptyState({
             <Text style={styles.starterChipText}>{prompt}</Text>
           </TouchableOpacity>
         ))}
-      </ScrollView>
-
-      {/* Capabilities */}
-      <View style={styles.capabilityList}>
-        {[
-          {
-            emoji: '🎯',
-            text: 'Knows your collection, wishlist & tone profile',
-            prompt: "Based on my collection and wishlist, what's the best next move for my tone?",
-          },
-          {
-            emoji: '🔌',
-            text: 'Signal chain, board layout & gear pairings',
-            prompt: 'Help me optimize my signal chain and board order.',
-          },
-          {
-            emoji: '🎸',
-            text: 'Tone, technique, genre & style advice',
-            prompt: 'Give me 3 practical tweaks to improve my tone for my style.',
-          },
-          {
-            emoji: '🏪',
-            text: 'Ready to buy? Head to Custom Shop for a curated pick',
-            prompt: "I'm ready to buy soon. Prep me for a Custom Shop run.",
-          },
-        ].map((item, i) => (
-          <TouchableOpacity
-            key={i}
-            style={styles.capabilityItem}
-            onPress={() => onPromptPress(item.prompt)}
-            activeOpacity={0.75}
-          >
-            <Text style={styles.capabilityEmoji}>{item.emoji}</Text>
-            <Text style={styles.capabilityText}>{item.text}</Text>
-          </TouchableOpacity>
-        ))}
       </View>
+
     </View>
   );
 }
@@ -538,6 +781,21 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  counterBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    paddingHorizontal: spacing.base,
+    paddingVertical: 5,
+  },
+  counterText: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.body,
+    color: colors.textMuted,
   },
   warningBanner: {
     flexDirection: 'row',
@@ -565,13 +823,6 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.md,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
-  },
-  headerBackBtn: {
-    width: 32,
-    height: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: -spacing.xs,
   },
   headerInner: {
     flexDirection: 'row',
@@ -639,15 +890,31 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   messagesContentEmpty: {
-    flex: 1,
     paddingTop: spacing.sm,
-    paddingBottom: spacing.sm,
+    paddingBottom: spacing.xl,
   },
   bubbleRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: spacing.sm,
     marginBottom: spacing.sm,
+  },
+  bubbleWithShare: {
+    flex: 1,
+    gap: 4,
+  },
+  bubbleShareBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingLeft: spacing.xs,
+    paddingVertical: 2,
+    alignSelf: 'flex-start',
+  },
+  bubbleShareText: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.body,
+    color: colors.textMuted,
   },
   bubbleRowUser: {
     flexDirection: 'row-reverse',
@@ -797,7 +1064,6 @@ const styles = StyleSheet.create({
   },
   // Empty state
   emptyState: {
-    paddingHorizontal: spacing.base,
     paddingVertical: spacing.sm,
     gap: spacing.sm,
   },
@@ -825,12 +1091,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   emptyIcon: {
-    fontSize: 24,
+    // kept for layout ref; icon rendered via Ionicons
   },
   emptyTitle: {
     fontSize: typography.sizes.lg,
     fontFamily: typography.display,
-    color: colors.textPrimary,
+    color: '#fff',
   },
   emptySubtitle: {
     fontSize: typography.sizes.xs,
@@ -840,6 +1106,9 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   emptyHint: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.xs,
     backgroundColor: colors.warning + '18',
     borderWidth: 1,
     borderColor: colors.warning + '40',
@@ -848,10 +1117,10 @@ const styles = StyleSheet.create({
     marginTop: spacing.xs,
   },
   emptyHintText: {
+    flex: 1,
     fontSize: typography.sizes.xs,
     fontFamily: typography.body,
     color: colors.warning,
-    textAlign: 'center',
     lineHeight: 18,
   },
   starterLabel: {
@@ -863,8 +1132,8 @@ const styles = StyleSheet.create({
   },
   starterRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: spacing.sm,
-    paddingRight: spacing.base,
   },
   starterChip: {
     backgroundColor: colors.surface,
@@ -879,26 +1148,238 @@ const styles = StyleSheet.create({
     fontFamily: typography.bodyMedium,
     color: colors.textSecondary,
   },
-  capabilityList: {
-    gap: spacing.xs,
+
+  // ─── Shortcut cards ──────────────────────────────────────────────────────────
+  shortcutRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
   },
-  capabilityItem: {
+  shortcutCard: {
+    flex: 1,
+  },
+  shortcutCardInner: {
+    flex: 1,
+    borderRadius: radius.xl,
+    padding: spacing.md,
+    minHeight: 144,
+    justifyContent: 'space-between',
+  },
+  shortcutBadgeRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.md,
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
+    gap: spacing.xs,
+  },
+  shortcutBadge: {
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radius.full,
+  },
+  shortcutBadgeText: {
+    fontSize: 8,
+    fontFamily: typography.bodySemiBold,
+    color: 'rgba(255,255,255,0.85)',
+    letterSpacing: 0.8,
+  },
+  shortcutLockChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: colors.gold + '22',
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.gold + '55',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: radius.full,
+  },
+  shortcutLockChipText: {
+    fontSize: 8,
+    fontFamily: typography.bodySemiBold,
+    color: colors.gold,
+    letterSpacing: 0.5,
+  },
+  shortcutContent: {
+    flex: 1,
+    justifyContent: 'center',
     paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
+    gap: 5,
   },
-  capabilityEmoji: {
-    fontSize: 20,
+  shortcutIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
   },
-  capabilityText: {
+  shortcutIconCircleGold: {
+    backgroundColor: 'rgba(201,168,48,0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(201,168,48,0.3)',
+  },
+  shortcutIconCircleWhite: {
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  shortcutLockedTitle: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.display,
+    color: colors.gold,
+    lineHeight: 18,
+  },
+  shortcutLoadingText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.display,
+    color: 'rgba(255,255,255,0.7)',
+    lineHeight: 18,
+  },
+  shortcutPickBrand: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.bodyMedium,
+    color: 'rgba(255,255,255,0.6)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  shortcutPickModel: {
+    fontSize: typography.sizes.base,
+    fontFamily: typography.display,
+    color: '#fff',
+    lineHeight: 20,
+  },
+  shortcutShopTitle: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.display,
+    color: '#fff',
+    lineHeight: 18,
+  },
+  shortcutCtaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingTop: spacing.xs,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.12)',
+  },
+  shortcutCta: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.bodySemiBold,
+    color: 'rgba(255,255,255,0.75)',
+  },
+
+  // ─── Weekly Pick detail modal ─────────────────────────────────────────────────
+  detailOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  detailBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  detailSheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.md,
+    gap: spacing.sm,
+  },
+  detailHandle: {
+    width: 36,
+    height: 4,
+    backgroundColor: colors.border,
+    borderRadius: radius.full,
+    alignSelf: 'center',
+    marginBottom: spacing.xs,
+  },
+  detailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  detailTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  detailTitle: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.gold,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+  detailPedal: {
+    fontSize: typography.sizes.xxl,
+    fontFamily: typography.display,
+    color: colors.textPrimary,
+    lineHeight: 32,
+  },
+  detailCategory: {
     fontSize: typography.sizes.sm,
     fontFamily: typography.body,
+    color: colors.textMuted,
+    marginTop: -spacing.xs,
+  },
+  detailCountdown: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.bodyMedium,
+    color: colors.gold,
+    letterSpacing: 0.3,
+  },
+  detailWhyLabel: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textMuted,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    marginTop: spacing.xs,
+  },
+  detailWhy: {
+    fontSize: typography.sizes.base,
+    fontFamily: typography.body,
     color: colors.textSecondary,
+    lineHeight: 22,
+  },
+  detailActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+  },
+  detailBtnReverb: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    backgroundColor: '#E25B45',
+    borderRadius: radius.lg,
+    paddingVertical: spacing.md,
+  },
+  detailBtnReverbText: {
+    fontSize: typography.sizes.base,
+    fontFamily: typography.bodySemiBold,
+    color: '#fff',
+  },
+  detailBtnWishlist: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    borderWidth: 1.5,
+    borderColor: colors.teal,
+    borderRadius: radius.lg,
+    paddingVertical: spacing.md,
+    backgroundColor: 'rgba(43,181,160,0.06)',
+  },
+  detailBtnWishlistDone: {
+    borderColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  detailBtnWishlistText: {
+    fontSize: typography.sizes.base,
+    fontFamily: typography.bodySemiBold,
+    color: colors.teal,
   },
 });
