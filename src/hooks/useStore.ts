@@ -569,26 +569,35 @@ export const useStore = create<Store>((set, get) => ({
     }
 
     if (needsFetch.length > 0) {
-      const fetched = await Promise.all(needsFetch.map(async ({ id, path }) => {
+      // Build a flat list of all paths (full + thumb) and fetch in ONE bulk call
+      // instead of 2 * N individual createSignedUrl requests.
+      const EXPIRES = 60 * 60 * 24 * 7; // 7 days
+      const allPaths = needsFetch.flatMap(({ path }) => [
+        path,
+        path.replace(/\.[^/.]+$/, '_sm.jpg'),
+      ]);
+      const { data: bulkData } = await supabase.storage
+        .from(bucket)
+        .createSignedUrls(allPaths, EXPIRES);
+
+      const urlByPath: Record<string, string> = {};
+      for (const entry of bulkData ?? []) {
+        if (entry.signedUrl && entry.path) urlByPath[entry.path] = entry.signedUrl;
+      }
+
+      for (const { id, path } of needsFetch) {
         const thumbPath = path.replace(/\.[^/.]+$/, '_sm.jpg');
-        const { data } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 24 * 7);
-        const url = data?.signedUrl ?? '';
-        if (url) {
-          cache[path] = { url, expiresAt: now + 7 * 24 * 60 * 60 * 1000 };
-        }
-        const { data: thumbData } = await supabase.storage.from(bucket).createSignedUrl(thumbPath, 60 * 60 * 24 * 7);
-        const thumbUrl = thumbData?.signedUrl ?? '';
-        if (thumbUrl) {
-          cache[thumbPath] = { url: thumbUrl, expiresAt: now + 7 * 24 * 60 * 60 * 1000 };
-        }
+        const url = urlByPath[path] ?? '';
+        const thumbUrl = urlByPath[thumbPath] ?? '';
+        if (url) cache[path] = { url, expiresAt: now + 7 * 24 * 60 * 60 * 1000 };
+        if (thumbUrl) cache[thumbPath] = { url: thumbUrl, expiresAt: now + 7 * 24 * 60 * 60 * 1000 };
         if (thumbUrl) {
           thumbResults.push([id, thumbUrl] as const);
         } else if (url) {
           thumbResults.push([id, url] as const);
         }
-        return [id, url] as const;
-      }));
-      results.push(...fetched);
+        if (url) results.push([id, url] as const);
+      }
       AsyncStorage.setItem(cacheKey, JSON.stringify(cache)).catch(() => {});
     }
 

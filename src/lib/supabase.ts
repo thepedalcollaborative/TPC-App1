@@ -98,10 +98,11 @@ export async function getEdgeAuthHeaders(): Promise<Record<string, string>> {
     return _cachedAuthHeader.header;
   }
   const { data: sessionData } = await supabase.auth.getSession();
-  const header = sessionData.session?.access_token
-    ? { Authorization: `Bearer ${sessionData.session.access_token}` }
+  const token = sessionData.session?.access_token;
+  const header: Record<string, string> = token
+    ? { Authorization: `Bearer ${token}` }
     : {};
-  if (sessionData.session?.access_token) {
+  if (token) {
     _cachedAuthHeader = { header, expiresAt: now + 4 * 60 * 1000 }; // 4 min
   }
   return header;

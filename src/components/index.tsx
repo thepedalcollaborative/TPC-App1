@@ -1,7 +1,13 @@
 export { ExpertMode } from './ExpertMode';
+export { FsftShareCard } from './FsftShareCard';
+export { CollectionShareCard } from './CollectionShareCard';
+export type { CollectionPedal, PriceMode } from './CollectionShareCard';
+export { default as SocialShareSheet } from './SocialShareSheet';
 export { PlayerOnboarding } from './PlayerOnboarding';
 export { ToneProfileEditor } from './ToneProfileEditor';
 export { PostOnboardingScreen } from './PostOnboardingScreen';
+export { WelcomeOnboarding } from './WelcomeOnboarding';
+export { default as GasOrPassMode } from './GasOrPassMode';
 
 import React, { useState } from 'react';
 import {
@@ -11,8 +17,8 @@ import {
   StyleSheet,
   ViewStyle,
   TextStyle,
-  Image,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, spacing, radius, categoryColors } from '../theme';
@@ -93,7 +99,7 @@ type PedalCardProps = {
   onLongPress?: () => void;
 };
 
-export function PedalCard({ userPedal, retired = false, marketValue, imageUrlOverride, viewMode = 'tile', boardColors, onPress, onLongPress }: PedalCardProps) {
+function PedalCardInner({ userPedal, retired = false, marketValue, imageUrlOverride, viewMode = 'tile', boardColors, onPress, onLongPress }: PedalCardProps) {
   const pedal = userPedal.pedal;
   if (!pedal) return null;
   const imageUrl = imageUrlOverride ?? userPedal.colorway?.image_url ?? pedal.image_url;
@@ -150,7 +156,8 @@ export function PedalCard({ userPedal, retired = false, marketValue, imageUrlOve
           <Image
             source={{ uri: imageUrl }}
             style={[styles.pedalCardImage, retired && styles.pedalCardImageRetired]}
-            resizeMode="cover"
+            contentFit="cover"
+            cachePolicy="memory-disk"
           />
         </View>
       ) : (
@@ -252,6 +259,17 @@ export function PedalCard({ userPedal, retired = false, marketValue, imageUrlOve
   );
 }
 
+export const PedalCard = React.memo(PedalCardInner, (prev, next) =>
+  prev.userPedal.id === next.userPedal.id &&
+  prev.marketValue === next.marketValue &&
+  prev.imageUrlOverride === next.imageUrlOverride &&
+  prev.viewMode === next.viewMode &&
+  prev.retired === next.retired &&
+  prev.onPress === next.onPress &&
+  prev.onLongPress === next.onLongPress &&
+  (prev.boardColors ?? []).join() === (next.boardColors ?? []).join()
+);
+
 // ─── MiniPedalCard ────────────────────────────────────────────────────────────
 // Compact horizontal-scroll card used on HomeScreen
 type MiniPedalCardProps = {
@@ -262,7 +280,7 @@ type MiniPedalCardProps = {
   onPress?: () => void;
 };
 
-export function MiniPedalCard({ userPedal, imageUrlOverride, viewMode = 'tile', boardColors, onPress }: MiniPedalCardProps) {
+function MiniPedalCardInner({ userPedal, imageUrlOverride, viewMode = 'tile', boardColors, onPress }: MiniPedalCardProps) {
   const [imageError, setImageError] = useState(false);
   const pedal = userPedal.pedal;
   if (!pedal) return null;
@@ -273,15 +291,6 @@ export function MiniPedalCard({ userPedal, imageUrlOverride, viewMode = 'tile', 
   const modelInitial = (pedal.model?.trim()?.[0] ?? '?').toUpperCase();
   const boardDots = (boardColors ?? []).slice(0, 3);
   const extraBoardCount = Math.max((boardColors?.length ?? 0) - boardDots.length, 0);
-
-  if (__DEV__ && imageUrl) {
-    console.log('[TPC] MiniPedalCard image', {
-      pedalId: pedal.id,
-      brand: pedal.brand,
-      model: pedal.model,
-      imageUrl,
-    });
-  }
 
   return (
     <TouchableOpacity
@@ -294,25 +303,11 @@ export function MiniPedalCard({ userPedal, imageUrlOverride, viewMode = 'tile', 
           <Image
             source={{ uri: imageUrl }}
             style={styles.miniCardImage}
-            resizeMode="cover"
-            onError={(e) => {
-              if (__DEV__) {
-                console.warn('[TPC] MiniPedalCard image error', {
-                  pedalId: pedal.id,
-                  imageUrl,
-                  error: e.nativeEvent,
-                });
-              }
+            contentFit="cover"
+            cachePolicy="memory-disk"
+            onError={() => {
               // Fall back to catalog image if user override or colorway image fails
               if (!imageError && imageUrl !== pedal.image_url) setImageError(true);
-            }}
-            onLoadEnd={() => {
-              if (__DEV__) {
-                console.log('[TPC] MiniPedalCard image load end', {
-                  pedalId: pedal.id,
-                  imageUrl,
-                });
-              }
             }}
           />
         </View>
@@ -348,6 +343,14 @@ export function MiniPedalCard({ userPedal, imageUrlOverride, viewMode = 'tile', 
     </TouchableOpacity>
   );
 }
+
+export const MiniPedalCard = React.memo(MiniPedalCardInner, (prev, next) =>
+  prev.userPedal.id === next.userPedal.id &&
+  prev.imageUrlOverride === next.imageUrlOverride &&
+  prev.viewMode === next.viewMode &&
+  prev.onPress === next.onPress &&
+  (prev.boardColors ?? []).join() === (next.boardColors ?? []).join()
+);
 
 // ─── SectionHeader ────────────────────────────────────────────────────────────
 type SectionHeaderProps = {
