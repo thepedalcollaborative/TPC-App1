@@ -124,6 +124,14 @@ function PedalCardInner({ userPedal, retired = false, marketValue, imageUrlOverr
     ? Math.round(marketValue - userPedal.purchase_price)
     : null;
 
+  // Realized P&L for retired pedals sold (not traded — no clean $ figure for trades)
+  const retiredPnl = retired
+    && userPedal.retired_method === 'sale'
+    && userPedal.retired_price != null
+    && userPedal.purchase_price != null
+    ? Math.round(userPedal.retired_price - userPedal.purchase_price)
+    : null;
+
   // Wishlist price-drop intelligence
   // Target can be user's set target price OR the catalog avg_price as fallback
   const effectiveTarget = userPedal.target_price ?? pedal.avg_price ?? null;
@@ -198,9 +206,21 @@ function PedalCardInner({ userPedal, retired = false, marketValue, imageUrlOverr
           </View>
           <View style={styles.pedalCardRight}>
             {retired ? (
-              <View style={styles.retiredBadge}>
-                <Text style={styles.retiredBadgeText}>PREVIOUS</Text>
-              </View>
+              <>
+                <View style={styles.retiredBadge}>
+                  <Text style={styles.retiredBadgeText}>PREVIOUS</Text>
+                </View>
+                {retiredPnl != null && (
+                  <Text style={[styles.marketDelta, retiredPnl >= 0 ? styles.marketGain : styles.marketLoss]}>
+                    {retiredPnl >= 0 ? '+' : ''}${retiredPnl.toLocaleString()}
+                  </Text>
+                )}
+                {userPedal.retired_price != null && (
+                  <Text style={styles.pedalPriceSub}>
+                    Sold ${userPedal.retired_price.toLocaleString()}
+                  </Text>
+                )}
+              </>
             ) : (
               <>
                 {marketValue != null ? (
