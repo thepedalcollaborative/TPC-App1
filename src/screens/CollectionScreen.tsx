@@ -2118,6 +2118,40 @@ export default function CollectionScreen() {
                         </View>
                       )}
 
+                      {/* "Got it back" — shown for retired pedals regardless of showRetireSection */}
+                      {detailPedal?.status === 'retired' && (
+                <View style={styles.detailDangerRow}>
+                  <TouchableOpacity
+                    style={styles.unretireBtn}
+                    onPress={() => {
+                      Alert.alert(
+                        'Got it back?',
+                        'This will move the pedal back to your Owned list and clear the retirement details.',
+                        [
+                          { text: 'Cancel', style: 'cancel' },
+                          {
+                            text: 'Yes, move to Owned',
+                            onPress: () => handleUnretirePedal(detailPedal),
+                          },
+                        ]
+                      );
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <Ionicons name="arrow-undo-outline" size={16} color={colors.teal} />
+                    <Text style={styles.unretireBtnText}>Got it back</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.removeBtn}
+                    onPress={handleRemovePedal}
+                    activeOpacity={0.8}
+                  >
+                    <Ionicons name="trash-outline" size={16} color={colors.rose} />
+                    <Text style={styles.removeBtnText}>Remove</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
                       {detailPedal && !showRetireSection && (
                 <View style={styles.detailDangerRow}>
                   {detailPedal.status !== 'retired' && (
@@ -2128,28 +2162,6 @@ export default function CollectionScreen() {
                     >
                       <Ionicons name="archive-outline" size={16} color={colors.rose} />
                       <Text style={styles.retireBtnText}>Retire this pedal</Text>
-                    </TouchableOpacity>
-                  )}
-                  {detailPedal.status === 'retired' && (
-                    <TouchableOpacity
-                      style={styles.unretireBtn}
-                      onPress={() => {
-                        Alert.alert(
-                          'Got it back?',
-                          'This will move the pedal back to your Owned list and clear the retirement details.',
-                          [
-                            { text: 'Cancel', style: 'cancel' },
-                            {
-                              text: 'Yes, move to Owned',
-                              onPress: () => handleUnretirePedal(detailPedal),
-                            },
-                          ]
-                        );
-                      }}
-                      activeOpacity={0.8}
-                    >
-                      <Ionicons name="arrow-undo-outline" size={16} color={colors.teal} />
-                      <Text style={styles.unretireBtnText}>Got it back</Text>
                     </TouchableOpacity>
                   )}
                   <TouchableOpacity
