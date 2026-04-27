@@ -98,6 +98,8 @@ const DateField: React.FC<{ value: string; onChange: (v: string) => void; placeh
             if (selected) onChange(formatDate(selected));
           }}
           maximumDate={new Date(2100, 11, 31)}
+          textColor={colors.teal}
+          accentColor={colors.teal}
           style={Platform.OS === 'ios' ? dateFieldStyles.inlinePicker : undefined}
         />
       )}
