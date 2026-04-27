@@ -482,6 +482,8 @@ export default function CollectionScreen() {
   const [retireNewColorways, setRetireNewColorways] = useState<PedalColorway[]>([]);
   const [retireNewColorwayId, setRetireNewColorwayId] = useState<string | null>(null);
   const [retireCashPaid, setRetireCashPaid] = useState('');
+  const [retireTradeReverbResults, setRetireTradeReverbResults] = useState<ReverbResult[]>([]);
+  const [retireTradeUpserting, setRetireTradeUpserting] = useState(false);
   const retireTradeDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fsftCardRef = useRef<View>(null);
   // One ref per page — all cards mounted simultaneously so images pre-load in parallel
@@ -634,15 +636,41 @@ export default function CollectionScreen() {
     setRetireNewColorways([]);
     setRetireNewColorwayId(null);
     if (retireTradeDebounce.current) clearTimeout(retireTradeDebounce.current);
-    if (!query.trim()) { setRetireTradeResults([]); return; }
+    if (!query.trim()) { setRetireTradeResults([]); setRetireTradeReverbResults([]); return; }
     retireTradeDebounce.current = setTimeout(async () => {
+      const safe = query.replace(/[^a-zA-Z0-9 \-_.]/g, '').trim().slice(0, 100);
+      if (!safe) { setRetireTradeResults([]); setRetireTradeReverbResults([]); return; }
       setRetireTradeSearching(true);
+      // Fire Reverb search in background — doesn't block catalog results
+      invokeEdgeFunction<SearchReverbResponse>('search-pedals', { query: safe }).then(({ data }) => {
+        if (data?.results) {
+          setRetireTradeReverbResults((data.results as ReverbResult[]).filter(r => !r.in_catalog));
+        }
+      }).catch(() => {});
+      // Local catalog search
       try {
-        const { data } = await invokeEdgeFunction<PedalSearchLocalResponse>('search-pedals', { query: query.trim(), localOnly: true });
+        const { data } = await invokeEdgeFunction<PedalSearchLocalResponse>('search-pedals', { query: safe, localOnly: true });
         setRetireTradeResults((data?.pedals as Pedal[]) ?? []);
       } catch { setRetireTradeResults([]); }
       setRetireTradeSearching(false);
     }, 350);
+  };
+
+  const handleSelectRetireTradeReverbResult = async (result: ReverbResult) => {
+    Haptics.selectionAsync();
+    setRetireTradeUpserting(true);
+    const { data, error } = await invokeEdgeFunction<SearchUpsertResponse>('search-pedals', {
+      action: 'upsert',
+      brand: result.brand,
+      model: result.model,
+      category: result.category,
+      avg_price: result.avg_price,
+      image_url: result.photo_url ?? null,
+    });
+    setRetireTradeUpserting(false);
+    if (!error && data?.pedal) {
+      handleSelectRetireNewPedal(data.pedal as Pedal);
+    }
   };
 
   const handleSelectRetireNewPedal = async (pedal: Pedal) => {
@@ -650,6 +678,7 @@ export default function CollectionScreen() {
     setRetireNewPedal(pedal);
     setRetireTradeSearch('');
     setRetireTradeResults([]);
+    setRetireTradeReverbResults([]);
     const { data } = await supabase
       .from('pedal_colorways')
       .select('*')
@@ -2273,21 +2302,68 @@ export default function CollectionScreen() {
                               placeholder="Search by brand or model..."
                               placeholderTextColor={colors.textMuted}
                             />
-                            {retireTradeSearching && <ActivityIndicator size="small" color={colors.teal} />}
+                            {(retireTradeSearching || retireTradeUpserting) && (
+                              <ActivityIndicator size="small" color={colors.teal} />
+                            )}
                           </View>
-                          {retireTradeResults.length > 0 && (
+                          {(retireTradeResults.length > 0 || retireTradeReverbResults.length > 0) && (
                             <View style={styles.retireSearchResults}>
+                              {/* Catalog results */}
                               {retireTradeResults.slice(0, 6).map(p => (
                                 <TouchableOpacity
                                   key={p.id}
-                                  style={styles.retireSearchResultRow}
+                                  style={styles.resultRow}
                                   onPress={() => handleSelectRetireNewPedal(p)}
                                   activeOpacity={0.7}
                                 >
-                                  <Text style={styles.retireSearchResultBrand}>{p.brand}</Text>
-                                  <Text style={styles.retireSearchResultModel}>{p.model}</Text>
+                                  <View style={styles.resultRowContent}>
+                                    <View style={styles.resultRowText}>
+                                      <Text style={styles.resultBrand}>{p.brand}</Text>
+                                      <Text style={styles.resultModel}>{p.model}</Text>
+                                    </View>
+                                    <View style={styles.resultRowRight}>
+                                      <CategoryBadge category={p.category} small />
+                                      {p.avg_price != null && (
+                                        <Text style={styles.resultPrice}>${p.avg_price}</Text>
+                                      )}
+                                    </View>
+                                  </View>
                                 </TouchableOpacity>
                               ))}
+                              {/* Reverb results not yet in catalog */}
+                              {retireTradeReverbResults.length > 0 && (
+                                <>
+                                  {retireTradeResults.length > 0 && (
+                                    <View style={styles.reverbDivider}>
+                                      <Text style={styles.reverbDividerText}>Also found on Reverb</Text>
+                                    </View>
+                                  )}
+                                  {retireTradeReverbResults.slice(0, 5).map((r, i) => (
+                                    <TouchableOpacity
+                                      key={`reverb-${i}`}
+                                      style={styles.resultRow}
+                                      onPress={() => handleSelectRetireTradeReverbResult(r)}
+                                      activeOpacity={0.7}
+                                    >
+                                      <View style={styles.resultRowContent}>
+                                        <View style={styles.resultRowText}>
+                                          <Text style={styles.resultBrand}>{r.brand}</Text>
+                                          <Text style={styles.resultModel}>{r.model}</Text>
+                                        </View>
+                                        <View style={styles.resultRowRight}>
+                                          <CategoryBadge category={r.category} small />
+                                          <View style={styles.reverbBadge}>
+                                            <Text style={styles.reverbBadgeText}>NEW</Text>
+                                          </View>
+                                          {r.avg_price != null && (
+                                            <Text style={styles.resultPrice}>~${r.avg_price}</Text>
+                                          )}
+                                        </View>
+                                      </View>
+                                    </TouchableOpacity>
+                                  ))}
+                                </>
+                              )}
                             </View>
                           )}
                         </>
