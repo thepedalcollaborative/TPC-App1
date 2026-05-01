@@ -1,0 +1,1 @@
+ALTER TABLE user_pedals ADD COLUMN IF NOT EXISTS loaned_to TEXT;

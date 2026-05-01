@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   View,
   Text,
@@ -12,6 +13,7 @@ import {
   Modal,
   Linking,
   Platform,
+  Switch,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -24,25 +26,118 @@ import { useStore } from '../hooks/useStore';
 import { supabase, FullExpertProfile } from '../lib/supabase';
 import { ToneProfileEditor } from '../components';
 import { StatCard, TPCLogoMark } from '../components';
-import { shareProfile } from '../lib/share';
-import { HiddenShareCard } from '../components/ShareCard';
-import { useShareCard } from '../lib/useShareCard';
 import { hasBetaFullAccess } from '../lib/subscription';
+import { connectPatreon } from '../lib/patreon';
+import { CURRENCIES, type CurrencyCode } from '../lib/formatMoney';
+import * as Notifications from 'expo-notifications';
+import {
+  requestNotificationPermissions,
+  scheduleWeeklyPickNotification,
+  scheduleVaultDigestNotification,
+  cancelAllTpcNotifications,
+} from '../lib/notifications';
+import { SwipeDismissSheet } from '../components/SwipeDismissSheet';
 
 const tpcSquare = require('../../assets/tpc-square.png');
 
 export default function ProfileScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
-  const { session, profile, ownedPedals, wishlistPedals, boards, fetchProfile, signOut, viewMode, setViewMode, openPaywall } =
+  const { session, profile, ownedPedals, wishlistPedals, retiredPedals, boards, fetchProfile, signOut, deleteAccount, viewMode, setViewMode, openPaywall, totalMarketValue, wifeMode, setWifeMode, currency, setCurrency } =
     useStore();
 
-  const { cardRef: rigCardRef, cardData: rigCardData, triggerShare: triggerRigShare } = useShareCard();
+  const [premiumMinimized, setPremiumMinimized] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState(profile?.display_name ?? '');
   const [isSaving, setIsSaving] = useState(false);
   const [showToneEditor, setShowToneEditor] = useState(false);
   const isPro = Boolean(profile?.is_premium) || hasBetaFullAccess();
+  const isPatreonPro = profile?.pro_source === 'patreon';
+  const [patreonLoading, setPatreonLoading] = useState(false);
+  const [showCurrencyPicker, setShowCurrencyPicker] = useState(false);
+
+  const handleConnectPatreon = async () => {
+    Haptics.selectionAsync();
+    setPatreonLoading(true);
+    try {
+      const result = await connectPatreon();
+      if (result.success) {
+        await fetchProfile();
+        if (result.isPro) {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          Alert.alert(
+            'Patreon Connected! ✦',
+            result.tier
+              ? `Your "${result.tier}" tier grants you Pro access. Thank you for supporting TPC!`
+              : 'Your Patreon membership grants you Pro access. Thank you for supporting TPC!',
+          );
+        } else {
+          Alert.alert(
+            'Patreon Linked',
+            "Your Patreon account is connected, but your current tier doesn't include Pro access. Upgrade your Patreon pledge to unlock Pro.",
+          );
+        }
+      } else if (!result.cancelled) {
+        Alert.alert('Connection Failed', result.error ?? 'Could not connect Patreon. Please try again.');
+      }
+    } finally {
+      setPatreonLoading(false);
+    }
+  };
+
+  // ── Notification toggles ───────────────────────────────────────────────────
+  const [notifWeeklyPick, setNotifWeeklyPick] = useState(false);
+  const [notifVaultDigest, setNotifVaultDigest] = useState(false);
+  const [notifPermDenied, setNotifPermDenied] = useState(false);
+
+  useEffect(() => {
+    AsyncStorage.getItem('premium_card_minimized').then(v => {
+      if (v === '1') setPremiumMinimized(true);
+    });
+  }, []);
+
+  const togglePremiumMinimized = useCallback(() => {
+    setPremiumMinimized(prev => {
+      const next = !prev;
+      AsyncStorage.setItem('premium_card_minimized', next ? '1' : '0');
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      const { status } = await Notifications.getPermissionsAsync();
+      if (status !== 'granted') { setNotifPermDenied(true); return; }
+      const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+      const ids = scheduled.map(n => n.identifier);
+      setNotifWeeklyPick(ids.includes('tpc-weekly-pick'));
+      setNotifVaultDigest(ids.includes('tpc-vault-digest'));
+    })();
+  }, []);
+
+  const handleNotifToggle = async (type: 'weekly' | 'vault', value: boolean) => {
+    if (value) {
+      const granted = await requestNotificationPermissions();
+      if (!granted) { setNotifPermDenied(true); return; }
+      setNotifPermDenied(false);
+    }
+    if (type === 'weekly') {
+      setNotifWeeklyPick(value);
+      if (value) {
+        await scheduleWeeklyPickNotification();
+      } else {
+        await Notifications.cancelScheduledNotificationAsync('tpc-weekly-pick').catch(() => {});
+      }
+    } else {
+      setNotifVaultDigest(value);
+      if (value) {
+        await scheduleVaultDigestNotification(ownedPedals.length, totalMarketValue);
+      } else {
+        await Notifications.cancelScheduledNotificationAsync('tpc-vault-digest').catch(() => {});
+      }
+    }
+  };
+  // ──────────────────────────────────────────────────────────────────────────
 
   const handleManageSubscription = async () => {
     const url =
@@ -91,6 +186,40 @@ export default function ProfileScreen() {
         },
       },
     ]);
+  };
+
+  const handleDeleteAccount = () => {
+    Alert.alert(
+      'Delete Account',
+      'This permanently deletes your account, all your pedals, boards, and data. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete My Account',
+          style: 'destructive',
+          onPress: () => {
+            // Second confirmation — extra friction for an irreversible action
+            Alert.alert(
+              'Are you sure?',
+              'All your data will be permanently deleted. There is no way to recover it.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Yes, Delete Everything',
+                  style: 'destructive',
+                  onPress: async () => {
+                    const { success, error } = await deleteAccount();
+                    if (!success) {
+                      Alert.alert('Error', error ?? 'Could not delete account. Please try again.');
+                    }
+                  },
+                },
+              ],
+            );
+          },
+        },
+      ],
+    );
   };
 
   const handleToneProfileSave = async (updated: FullExpertProfile) => {
@@ -190,58 +319,76 @@ export default function ProfileScreen() {
       {/* ── Stats ── */}
       <View style={styles.statsSection}>
         <StatCard label="Owned" value={ownedPedals.length} accent={colors.teal} />
-        <StatCard label="Wishlist" value={wishlistPedals.length} accent={colors.rose} />
+        <StatCard label="GAS List" value={wishlistPedals.length} accent={colors.rose} />
         <StatCard label="Boards" value={boards.length} accent={colors.warning} />
       </View>
 
       {/* ── Premium Card ── */}
       {!isPro && (
         <View style={styles.section}>
-          <LinearGradient
-            colors={[colors.teal + 'cc', colors.tealDark]}
-            style={styles.premiumCard}
-          >
-            <View style={styles.premiumTop}>
-              <View>
-                <Text style={styles.premiumBadge}>✦ GO PREMIUM</Text>
-                <Text style={styles.premiumTitle}>Unlock Everything</Text>
+          {premiumMinimized ? (
+            <TouchableOpacity
+              style={styles.premiumMinimized}
+              onPress={() => { Haptics.selectionAsync(); togglePremiumMinimized(); }}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.premiumMinimizedText}>✦ GO PREMIUM</Text>
+              <Ionicons name="chevron-down" size={14} color={colors.teal} />
+            </TouchableOpacity>
+          ) : (
+            <LinearGradient
+              colors={[colors.teal + 'cc', colors.tealDark]}
+              style={styles.premiumCard}
+            >
+              <View style={styles.premiumTop}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.premiumBadge}>✦ GO PREMIUM</Text>
+                  <Text style={styles.premiumTitle}>Unlock Everything</Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => { Haptics.selectionAsync(); togglePremiumMinimized(); }}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  style={styles.premiumMinimizeBtn}
+                >
+                  <Ionicons name="chevron-up" size={18} color="rgba(255,255,255,0.6)" />
+                </TouchableOpacity>
               </View>
-              <Image source={tpcSquare} style={styles.premiumLogo} resizeMode="contain" />
-            </View>
-            <Text style={styles.premiumDesc}>
-              Unlimited boards, advanced Finder uses, early access to new features, and support indie development.
-            </Text>
-            <View style={styles.premiumPriceRow}>
-              <View style={styles.premiumPriceCard}>
-                <Text style={styles.premiumPrice}>$6.99</Text>
-                <Text style={styles.premiumPricePer}>/ month</Text>
-              </View>
-              <View style={styles.premiumPriceCard}>
-                <Text style={styles.premiumPrice}>$59.99</Text>
-                <Text style={styles.premiumPricePer}>/ year</Text>
-                <View style={styles.premiumSaveBadge}>
-                  <Text style={styles.premiumSaveText}>SAVE 28%</Text>
+              <Text style={styles.premiumDesc}>
+                Unlimited boards, advanced Finder uses, early access to new features, and support indie development.
+              </Text>
+              <View style={styles.premiumPriceRow}>
+                <View style={styles.premiumPriceCard}>
+                  <Text style={styles.premiumPrice}>$6.99</Text>
+                  <Text style={styles.premiumPricePer}>/ month</Text>
+                </View>
+                <View style={styles.premiumPriceCard}>
+                  <Text style={styles.premiumPrice}>$59.99</Text>
+                  <Text style={styles.premiumPricePer}>/ year</Text>
+                  <View style={styles.premiumSaveBadge}>
+                    <Text style={styles.premiumSaveText}>SAVE 28%</Text>
+                  </View>
                 </View>
               </View>
-            </View>
-            <TouchableOpacity
-              style={styles.premiumCTA}
-              activeOpacity={0.85}
-              onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                openPaywall('general');
-              }}
-            >
-              <Text style={styles.premiumCTAText}>Go Premium →</Text>
-            </TouchableOpacity>
-          </LinearGradient>
+              <TouchableOpacity
+                style={styles.premiumCTA}
+                activeOpacity={0.85}
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                  openPaywall('general');
+                }}
+              >
+                <Text style={styles.premiumCTAText}>Go Premium →</Text>
+              </TouchableOpacity>
+            </LinearGradient>
+          )}
         </View>
       )}
 
-      {/* ── Tone Profile ── */}
+      {/* ── Your Gear Story ── */}
       <View style={styles.section}>
-        <Text style={styles.sectionLabel}>TONE PROFILE</Text>
+        <Text style={styles.sectionLabel}>YOUR GEAR STORY</Text>
         <View style={styles.settingsCard}>
+          {/* Tone profile row */}
           <TouchableOpacity
             style={styles.settingsRow}
             onPress={() => {
@@ -267,6 +414,30 @@ export default function ProfileScreen() {
                 </Text>
               )}
             </View>
+            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+
+          {/* Gear History */}
+          <View style={styles.settingsDivider} />
+          <TouchableOpacity
+            style={styles.settingsRow}
+            onPress={() => { Haptics.selectionAsync(); navigation.navigate('GearHistory' as never); }}
+            activeOpacity={0.75}
+          >
+            <Ionicons name="archive-outline" size={20} color={colors.textSecondary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.settingsRowText}>Gear History</Text>
+              {retiredPedals.length > 0 && (
+                <Text style={styles.settingsRowSub}>
+                  {retiredPedals.length} pedal{retiredPedals.length !== 1 ? 's' : ''} moved on from
+                </Text>
+              )}
+            </View>
+            {retiredPedals.length > 0 && (
+              <View style={styles.gearHistoryBadge}>
+                <Text style={styles.gearHistoryBadgeText}>{retiredPedals.length}</Text>
+              </View>
+            )}
             <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
           </TouchableOpacity>
         </View>
@@ -298,13 +469,76 @@ export default function ProfileScreen() {
 
           <View style={styles.settingsDivider} />
 
-          <TouchableOpacity style={styles.settingsRow} disabled>
-            <Ionicons name="notifications-outline" size={20} color={colors.textMuted} />
-            <Text style={[styles.settingsRowText, { color: colors.textMuted }]}>
-              Notifications
-            </Text>
-            <Text style={styles.comingSoon}>Soon</Text>
+          {/* Bliss Mode */}
+          <View style={styles.settingsRow}>
+            <Ionicons name="eye-off-outline" size={20} color={colors.textSecondary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.settingsRowText}>Bliss Mode</Text>
+              <Text style={styles.settingsRowSub}>Hides dollar amounts from view</Text>
+            </View>
+            <Switch
+              value={wifeMode}
+              onValueChange={(v) => { Haptics.selectionAsync(); setWifeMode(v); }}
+              trackColor={{ false: colors.border, true: colors.teal + '99' }}
+              thumbColor={wifeMode ? colors.teal : colors.textMuted}
+              ios_backgroundColor={colors.border}
+            />
+          </View>
+
+          <View style={styles.settingsDivider} />
+
+          {/* Currency */}
+          <TouchableOpacity
+            style={styles.settingsRow}
+            onPress={() => { Haptics.selectionAsync(); setShowCurrencyPicker(true); }}
+            activeOpacity={0.75}
+          >
+            <Ionicons name="cash-outline" size={20} color={colors.textSecondary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.settingsRowText}>Currency</Text>
+              <Text style={styles.settingsRowSub}>
+                {CURRENCIES.find(c => c.code === currency)?.label ?? 'US Dollar'}
+              </Text>
+            </View>
+            <Text style={styles.currencyCode}>{currency}</Text>
+            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
           </TouchableOpacity>
+
+          <View style={styles.settingsDivider} />
+
+          <View style={styles.settingsRow}>
+            <Ionicons name="notifications-outline" size={20} color={colors.textSecondary} />
+            <Text style={styles.settingsRowText}>Notifications</Text>
+          </View>
+          {notifPermDenied && (
+            <TouchableOpacity
+              style={styles.notifPermRow}
+              onPress={() => Linking.openSettings()}
+            >
+              <Ionicons name="alert-circle-outline" size={14} color={colors.warning} />
+              <Text style={styles.notifPermText}>Enable in Settings to receive notifications</Text>
+            </TouchableOpacity>
+          )}
+          <View style={styles.settingsSubRow}>
+            <Text style={styles.settingsSubLabel}>Weekly Pick</Text>
+            <Switch
+              value={notifWeeklyPick}
+              onValueChange={v => handleNotifToggle('weekly', v)}
+              trackColor={{ false: colors.border, true: colors.teal + '99' }}
+              thumbColor={notifWeeklyPick ? colors.teal : colors.textMuted}
+              ios_backgroundColor={colors.border}
+            />
+          </View>
+          <View style={styles.settingsSubRow}>
+            <Text style={styles.settingsSubLabel}>Vault Digest (Sundays)</Text>
+            <Switch
+              value={notifVaultDigest}
+              onValueChange={v => handleNotifToggle('vault', v)}
+              trackColor={{ false: colors.border, true: colors.teal + '99' }}
+              thumbColor={notifVaultDigest ? colors.teal : colors.textMuted}
+              ios_backgroundColor={colors.border}
+            />
+          </View>
 
           <View style={styles.settingsDivider} />
 
@@ -357,42 +591,40 @@ export default function ProfileScreen() {
               {session?.user.email}
             </Text>
           </View>
+
+          <View style={styles.settingsDivider} />
+
+          {/* Patreon connect / status row */}
+          <TouchableOpacity
+            style={styles.settingsRow}
+            onPress={isPatreonPro ? undefined : handleConnectPatreon}
+            disabled={patreonLoading || isPatreonPro}
+            activeOpacity={isPatreonPro ? 1 : 0.75}
+          >
+            {patreonLoading ? (
+              <ActivityIndicator size="small" color={colors.teal} />
+            ) : (
+              <PatreonIcon color={isPatreonPro ? colors.warning : colors.textSecondary} />
+            )}
+            <View style={{ flex: 1 }}>
+              <Text style={styles.settingsRowText}>
+                {isPatreonPro ? 'Patreon Connected' : 'Connect Patreon'}
+              </Text>
+              {isPatreonPro && (
+                <Text style={styles.toneProfileSub}>Pro access via Patreon membership</Text>
+              )}
+            </View>
+            {isPatreonPro ? (
+              <View style={styles.patreonBadge}>
+                <Text style={styles.patreonBadgeText}>✦ PRO</Text>
+              </View>
+            ) : (
+              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+            )}
+          </TouchableOpacity>
         </View>
       </View>
 
-      {/* ── Share My Rig — image card (Instagram/TikTok) + text fallback ── */}
-      <View style={styles.shareRigRow}>
-        <TouchableOpacity
-          style={styles.shareRigBtn}
-          onPress={() => {
-            Haptics.selectionAsync();
-            const genres = profile?.pedal_expert_profile?.genres ?? [];
-            triggerRigShare({
-              type: 'rig',
-              displayName,
-              ownedCount: ownedPedals.length,
-              genre: genres.length ? genres.slice(0, 2).join(', ') : undefined,
-              tone: profile?.pedal_expert_profile?.tone_identity ?? undefined,
-            });
-          }}
-          activeOpacity={0.75}
-        >
-          <Ionicons name="share-social-outline" size={16} color={colors.teal} />
-          <Text style={styles.shareRigText}>Share as Image</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.shareRigBtnText}
-          onPress={() => {
-            Haptics.selectionAsync();
-            shareProfile(displayName, ownedPedals.length, profile?.pedal_expert_profile?.genres ?? [], profile?.pedal_expert_profile?.tone_identity ?? undefined);
-          }}
-          activeOpacity={0.75}
-        >
-          <Ionicons name="share-outline" size={14} color={colors.textMuted} />
-          <Text style={styles.shareRigTextMuted}>Text</Text>
-        </TouchableOpacity>
-      </View>
-      <HiddenShareCard cardRef={rigCardRef} cardData={rigCardData} />
 
       {/* ── Sign Out ── */}
       <TouchableOpacity style={styles.signOutBtn} onPress={handleSignOut} activeOpacity={0.75}>
@@ -400,8 +632,58 @@ export default function ProfileScreen() {
         <Text style={styles.signOutText}>Sign Out</Text>
       </TouchableOpacity>
 
+      {/* ── Delete Account ── */}
+      <TouchableOpacity style={styles.deleteAccountBtn} onPress={handleDeleteAccount} activeOpacity={0.75}>
+        <Text style={styles.deleteAccountText}>Delete Account</Text>
+      </TouchableOpacity>
+
       <Text style={styles.version}>The Pedal Collaborative v1.0</Text>
     </ScrollView>
+
+    {/* ── Currency Picker Modal ── */}
+    <Modal
+      visible={showCurrencyPicker}
+      transparent
+      animationType="slide"
+      onRequestClose={() => setShowCurrencyPicker(false)}
+    >
+      <View style={styles.currencyOverlay}>
+        <TouchableOpacity
+          style={styles.currencyBackdrop}
+          activeOpacity={1}
+          onPress={() => setShowCurrencyPicker(false)}
+        />
+        <SwipeDismissSheet style={[styles.currencySheet, { paddingBottom: insets.bottom + 16 }]} onDismiss={() => setShowCurrencyPicker(false)}>
+          <Text style={styles.currencyTitle}>Currency</Text>
+          {CURRENCIES.map((c) => (
+            <TouchableOpacity
+              key={c.code}
+              style={[
+                styles.currencyRow,
+                c.code === currency && styles.currencyRowActive,
+              ]}
+              onPress={() => {
+                Haptics.selectionAsync();
+                setCurrency(c.code as CurrencyCode);
+                setShowCurrencyPicker(false);
+              }}
+              activeOpacity={0.75}
+            >
+              <Text style={styles.currencySymbol}>{c.symbol}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.currencyLabel, c.code === currency && styles.currencyLabelActive]}>
+                  {c.label}
+                </Text>
+                <Text style={styles.currencyCodeSub}>{c.code}</Text>
+              </View>
+              {c.code === currency && (
+                <Ionicons name="checkmark" size={18} color={colors.teal} />
+              )}
+            </TouchableOpacity>
+          ))}
+        </SwipeDismissSheet>
+      </View>
+    </Modal>
 
     {/* ── Tone Profile Editor Modal ── */}
     <Modal
@@ -442,6 +724,31 @@ export default function ProfileScreen() {
     </>
   );
 }
+
+// ─── Patreon "P" icon (inline, no svg lib needed) ────────────────────────────
+function PatreonIcon({ color }: { color: string }) {
+  return (
+    <View style={[patreonIconStyles.circle, { borderColor: color + '60' }]}>
+      <Text style={[patreonIconStyles.letter, { color }]}>P</Text>
+    </View>
+  );
+}
+
+const patreonIconStyles = StyleSheet.create({
+  circle: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  letter: {
+    fontSize: 11,
+    fontWeight: '800',
+    lineHeight: 14,
+  },
+});
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
@@ -572,6 +879,26 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
   // Premium card
+  premiumMinimized: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.teal + '18',
+    borderWidth: 1,
+    borderColor: colors.teal + '55',
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  premiumMinimizedText: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.bodySemiBold,
+    color: colors.teal,
+    letterSpacing: 1,
+  },
+  premiumMinimizeBtn: {
+    padding: 2,
+  },
   premiumCard: {
     borderRadius: radius.xl,
     padding: spacing.xl,
@@ -679,6 +1006,17 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     marginTop: 2,
   },
+  gearHistoryBadge: {
+    backgroundColor: colors.border,
+    borderRadius: radius.full,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  gearHistoryBadgeText: {
+    fontSize: 11,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textMuted,
+  },
   viewModeToggle: {
     flexDirection: 'row',
     gap: spacing.xs,
@@ -716,6 +1054,32 @@ const styles = StyleSheet.create({
     borderRadius: radius.full,
     paddingHorizontal: 8,
     paddingVertical: 2,
+  },
+  settingsSubRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.base,
+    paddingVertical: spacing.xs,
+  },
+  settingsSubLabel: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.body,
+    color: colors.textSecondary,
+    marginLeft: 20 + spacing.md, // align with icon rows above
+  },
+  notifPermRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.base,
+    paddingBottom: spacing.xs,
+    marginLeft: 20 + spacing.md,
+  },
+  notifPermText: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.body,
+    color: colors.warning,
   },
   // Share rig
   shareRigRow: {
@@ -774,6 +1138,20 @@ const styles = StyleSheet.create({
     fontFamily: typography.bodyMedium,
     color: colors.rose,
   },
+  // Delete account — intentionally low-contrast to avoid accidental taps
+  deleteAccountBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.sm,
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.xs,
+  },
+  deleteAccountText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+    textDecorationLine: 'underline',
+  },
   version: {
     fontSize: typography.sizes.xs,
     fontFamily: typography.body,
@@ -781,4 +1159,101 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: spacing.xl,
   },
+  settingsRowIcon: {
+    fontSize: 18,
+    width: 20,
+    textAlign: 'center',
+  },
+  settingsRowSub: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+    marginTop: 1,
+  },
+  currencyCode: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textSecondary,
+    marginRight: spacing.xs,
+  },
+  // Currency picker modal
+  currencyOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  currencyBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  currencySheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    paddingTop: spacing.sm,
+    paddingHorizontal: spacing.base,
+    borderTopWidth: 1,
+    borderColor: colors.border,
+  },
+  currencyHandle: {
+    width: 36,
+    height: 4,
+    backgroundColor: colors.border,
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginBottom: spacing.lg,
+  },
+  currencyTitle: {
+    fontSize: typography.sizes.lg,
+    fontFamily: typography.display,
+    color: colors.textPrimary,
+    marginBottom: spacing.md,
+  },
+  currencyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.lg,
+    gap: spacing.md,
+  },
+  currencyRowActive: {
+    backgroundColor: colors.teal + '12',
+  },
+  currencySymbol: {
+    fontSize: typography.sizes.lg,
+    fontFamily: typography.display,
+    color: colors.textSecondary,
+    width: 28,
+    textAlign: 'center',
+  },
+  currencyLabel: {
+    fontSize: typography.sizes.base,
+    fontFamily: typography.body,
+    color: colors.textPrimary,
+  },
+  currencyLabelActive: {
+    fontFamily: typography.bodySemiBold,
+    color: colors.teal,
+  },
+  currencyCodeSub: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+    marginTop: 1,
+  },
+  patreonBadge: {
+    backgroundColor: colors.warning + '20',
+    borderRadius: radius.full,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderWidth: 1,
+    borderColor: colors.warning + '50',
+  },
+  patreonBadgeText: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.bodySemiBold,
+    color: colors.warning,
+    letterSpacing: 0.5,
+  },
+
 });

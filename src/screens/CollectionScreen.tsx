@@ -32,11 +32,15 @@ import { colors, typography, spacing, radius, gradients, boardColorMap } from '.
 import { useStore } from '../hooks/useStore';
 import { supabase, Pedal, UserPedal, PedalColorway, invokeEdgeFunction } from '../lib/supabase';
 import { PedalCard, CategoryBadge, EmptyState, SocialShareSheet, FsftShareCard, CollectionShareCard } from '../components';
+import { SwipeDismissSheet } from '../components/SwipeDismissSheet';
+import { NetworkErrorView } from '../components/NetworkErrorView';
+import { classifyError, extractHttpStatus, type ClassifiedError } from '../lib/networkError';
 import type { CollectionPedal, PriceMode } from '../components';
 import { TabParamList } from '../types/navigation';
 import { reverbAffiliateUrl } from '../lib/reverb';
 import { shareGasList, shareNewPedal, shareFsftList, shareCollectionList, shareAsImage, type FsftPedal } from '../lib/share';
 import { hasBetaFullAccess } from '../lib/subscription';
+import { useFormatMoney } from '../hooks/useFormatMoney';
 import { captureRef } from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system';
@@ -189,7 +193,8 @@ export default function CollectionScreen() {
   const insets = useSafeAreaInsets();
   const route = useRoute<RouteProp<TabParamList, 'Vault'>>();
   const navigation = useNavigation<NavigationProp<TabParamList>>();
-  const { session, profile, ownedPedals, wishlistPedals, retiredPedals, listedPedals, totalInvested, totalMarketValue, marketValues, fetchPedals, userImageUrls, userImageThumbUrls, refreshUserImages, viewMode, boards, updateListingStatus } = useStore();
+  const { session, profile, ownedPedals, wishlistPedals, retiredPedals, listedPedals, totalInvested, totalMarketValue, marketValues, fetchPedals, userImageUrls, userImageThumbUrls, refreshUserImages, viewMode, boards, updateListingStatus, wifeMode } = useStore();
+  const { fmt, fmtDelta } = useFormatMoney();
 
   const [activeTab, setActiveTab] = useState<'owned' | 'wishlist' | 'listed'>('owned');
   const [searchQuery, setSearchQuery] = useState('');
@@ -212,6 +217,14 @@ export default function CollectionScreen() {
   useEffect(() => () => { if (nudgeDismissRef.current) clearTimeout(nudgeDismissRef.current); }, []);
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [detailPedal, setDetailPedal] = useState<UserPedal | null>(null);
+  const [showReassignModal, setShowReassignModal] = useState(false);
+  const [reassignQuery, setReassignQuery] = useState('');
+  const [reassignResults, setReassignResults] = useState<Pedal[]>([]);
+  const [reassignReverbResults, setReassignReverbResults] = useState<ReverbResult[]>([]);
+  const [reassignSearching, setReassignSearching] = useState(false);
+  const [reassignSaving, setReassignSaving] = useState(false);
+  const reassignDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reassignSearchIdRef = useRef(0);
   const [detailColorways, setDetailColorways] = useState<PedalColorway[]>([]);
   const [detailColorwayId, setDetailColorwayId] = useState<string | null>(null);
   const [acquiredDate, setAcquiredDate] = useState('');
@@ -227,6 +240,8 @@ export default function CollectionScreen() {
   const [listingStatus, setListingStatus] = useState<'for_sale' | 'for_trade' | 'for_sale_or_trade' | null>(null);
   const [askingPrice, setAskingPrice] = useState('');
   const [tradeWants, setTradeWants] = useState('');
+  const [isOnLoan, setIsOnLoan] = useState(false);
+  const [loanedTo, setLoanedTo] = useState('');
   const [fsftShareOpen, setFsftShareOpen] = useState(false);
   const [collectionShareModalOpen, setCollectionShareModalOpen] = useState(false);
   const [collectionPage, setCollectionPage] = useState(0);
@@ -497,7 +512,7 @@ export default function CollectionScreen() {
   const [wishlistListings, setWishlistListings] = useState<Array<{ title: string; price: number | null; currency: string | null; condition: string | null; date: string | null; url: string | null; photo_url?: string | null }>>([]);
   const [wishlistSort, setWishlistSort] = useState<'newest' | 'price'>('newest');
   const [wishlistLoading, setWishlistLoading] = useState(false);
-  const [wishlistError, setWishlistError] = useState<string | null>(null);
+  const [wishlistError, setWishlistError] = useState<ClassifiedError | null>(null);
 
   useEffect(() => {
     const initial = route.params?.initialTab;
@@ -605,6 +620,8 @@ export default function CollectionScreen() {
     setListingStatus(item.listing_status ?? null);
     setAskingPrice(item.asking_price != null ? String(item.asking_price) : '');
     setTradeWants(item.trade_wants ?? '');
+    setIsOnLoan(item.loaned_to != null);
+    setLoanedTo(item.loaned_to ?? '');
     setTargetPrice((item as unknown as Record<string, unknown>).target_price != null ? String((item as unknown as Record<string, unknown>).target_price) : '');
     setRetiredDate(item.retired_date ? toDisplayDate(item.retired_date) : '');
     setRetiredMethod(
@@ -754,11 +771,11 @@ export default function CollectionScreen() {
       if (listings.length === 0) {
         const primaryDebug = (data as { _debug?: { stage?: string; reverbStatus?: number; reverbError?: string; error?: string } } | null)?._debug;
         const stage = primaryDebug?.stage;
-        const status = primaryDebug?.reverbStatus;
-        const err = primaryDebug?.reverbError || primaryDebug?.error;
         if (stage) {
-          setWishlistError(`No listings found (${stage}${status ? ` ${status}` : ''}${err ? `: ${err}` : ''}).`);
+          // The edge function ran fine but the external marketplace API failed
+          setWishlistError(classifyError(null, { externalApiStage: stage }));
         }
+        // else: truly empty, no error — "No listings found right now." shown by default
       }
 
       // If this pedal has no image at all, kick off a quality-scored image fetch
@@ -778,15 +795,9 @@ export default function CollectionScreen() {
         }).catch(() => {});
       }
     } catch (e) {
-      const maybeErr = e as { message?: string; context?: { status?: number; text?: () => Promise<string> } };
-      const status = maybeErr?.context?.status;
-      let body = '';
-      if (maybeErr?.context?.text) {
-        try { body = await maybeErr.context.text(); } catch {}
-      }
-      const msg = maybeErr?.message ?? String(e);
-      if (__DEV__) console.warn('[Wishlist listings] exception:', { msg, status, body });
-      setWishlistError(`Could not load listings${status ? ` (${status})` : ''}${body ? `: ${body}` : ''}`);
+      const status = extractHttpStatus(e);
+      if (__DEV__) console.warn('[Wishlist listings] error:', { msg: (e as Error)?.message, status });
+      setWishlistError(classifyError(e, { httpStatus: status }));
     } finally {
       setWishlistLoading(false);
     }
@@ -819,10 +830,12 @@ export default function CollectionScreen() {
       ...(detailPedal.status === 'owned' && !showRetireSection && {
         listing_status: listingStatus,
         asking_price: (listingStatus === 'for_sale' || listingStatus === 'for_sale_or_trade') ? parsePrice(askingPrice) : null,
+        loaned_to: isOnLoan ? (loanedTo.trim() || null) : null,
       }),
       ...(showRetireSection && {
         listing_status: null,
         asking_price: null,
+        loaned_to: null,
       }),
     };
 
@@ -857,7 +870,8 @@ export default function CollectionScreen() {
 
     if (error) {
       setSavingDetails(false);
-      Alert.alert('Save failed', error.message);
+      const classified = classifyError(error, { httpStatus: extractHttpStatus(error) });
+      Alert.alert(classified.title, classified.message);
       return;
     }
 
@@ -1038,6 +1052,85 @@ export default function CollectionScreen() {
     ]);
   };
 
+  const openReassign = () => {
+    setReassignQuery('');
+    setReassignResults([]);
+    setReassignReverbResults([]);
+    setReassignSearching(false);
+    setReassignSaving(false);
+    setShowReassignModal(true);
+  };
+
+  const closeReassign = () => {
+    setShowReassignModal(false);
+    setReassignQuery('');
+    setReassignResults([]);
+    setReassignReverbResults([]);
+  };
+
+  const handleReassignSearch = (query: string) => {
+    setReassignQuery(query);
+    if (reassignDebounceRef.current) clearTimeout(reassignDebounceRef.current);
+    if (!query.trim()) { setReassignResults([]); setReassignReverbResults([]); return; }
+    reassignDebounceRef.current = setTimeout(async () => {
+      const safe = query.replace(/[^a-zA-Z0-9 \-_.]/g, '').trim().slice(0, 100);
+      if (!safe) { setReassignResults([]); setReassignReverbResults([]); return; }
+      const searchId = ++reassignSearchIdRef.current;
+      setReassignSearching(true);
+
+      // Reverb search in background (same pattern as AddPedalModal)
+      invokeEdgeFunction<{ results: ReverbResult[] }>('search-pedals', { query: safe }).then(({ data, error }) => {
+        if (reassignSearchIdRef.current !== searchId || error) return;
+        const all = (data?.results ?? []) as ReverbResult[];
+        setReassignReverbResults(all.filter(r => !r.in_catalog));
+      }).catch(() => {});
+
+      // Catalog search
+      try {
+        const { data } = await invokeEdgeFunction<{ pedals: Pedal[] }>('search-pedals', { query: safe, localOnly: true });
+        if (reassignSearchIdRef.current !== searchId) return;
+        setReassignResults((data?.pedals ?? []) as Pedal[]);
+      } catch {
+        if (reassignSearchIdRef.current === searchId) setReassignResults([]);
+      }
+      if (reassignSearchIdRef.current === searchId) setReassignSearching(false);
+    }, 350);
+  };
+
+  const handleReassignSelectReverb = async (result: ReverbResult) => {
+    setReassignSaving(true);
+    const { data, error } = await invokeEdgeFunction<{ pedal?: Pedal }>('search-pedals', {
+      action: 'upsert',
+      brand: result.brand,
+      model: result.model,
+      category: result.category,
+      avg_price: result.avg_price,
+      image_url: result.photo_url ?? null,
+    });
+    if (error || !data?.pedal) {
+      setReassignSaving(false);
+      Alert.alert('Error', 'Could not add this pedal to the catalog.');
+      return;
+    }
+    await handleReassignPedal(data.pedal as Pedal);
+  };
+
+  const handleReassignPedal = async (newPedal: Pedal) => {
+    if (!detailPedal) return;
+    setReassignSaving(true);
+    const { error } = await supabase
+      .from('user_pedals')
+      .update({ pedal_id: newPedal.id })
+      .eq('id', detailPedal.id);
+    setReassignSaving(false);
+    if (error) {
+      Alert.alert('Reassign failed', error.message);
+      return;
+    }
+    closeReassign();
+    fetchPedals();
+  };
+
   const handleWishlistLongPress = (item: UserPedal) => {
     if (item.status !== 'wishlist') return;
     Alert.alert('Remove from GAS list?', 'This will remove it from your GAS list.', [
@@ -1189,21 +1282,21 @@ export default function CollectionScreen() {
       <LinearGradient colors={gradients.header} style={styles.header}>
         <View style={styles.headerTitleRow}>
           <Text style={styles.headerTitle}>Vault</Text>
-          {totalInvested > 0 && (
+          {totalInvested > 0 && !wifeMode && (
             <View style={styles.valueRow}>
               <View style={styles.valuePair}>
                 <Text style={styles.valueLabel}>Invested</Text>
                 <Text style={styles.valueAmount}>
-                  ${totalInvested.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                  {fmt(totalInvested)}
                 </Text>
               </View>
-              {totalMarketValue > 0 && (
+              {totalMarketValue > 0 && !wifeMode && (
                 <>
                   <Text style={styles.valueDot}>•</Text>
                   <View style={styles.valuePair}>
                     <Text style={styles.valueLabel}>Est. Value</Text>
                     <Text style={styles.valueAmount}>
-                      ~${totalMarketValue.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                      {fmt(totalMarketValue)}
                     </Text>
                   </View>
                   <View
@@ -1218,8 +1311,7 @@ export default function CollectionScreen() {
                         { color: totalMarketValue >= totalInvested ? colors.teal : colors.rose },
                       ]}
                     >
-                      {totalMarketValue >= totalInvested ? '+' : ''}
-                      ${Math.abs(totalMarketValue - totalInvested).toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                      {fmtDelta(totalMarketValue - totalInvested)}
                     </Text>
                   </View>
                 </>
@@ -1545,8 +1637,7 @@ export default function CollectionScreen() {
           behavior={undefined}
         >
           <TouchableOpacity style={styles.modalBackdrop} onPress={closeDetail} activeOpacity={1} />
-          <View style={styles.modalSheet}>
-            <View style={styles.modalHandle} />
+          <SwipeDismissSheet style={styles.modalSheet} onDismiss={closeDetail}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>
                 {detailPedal?.pedal ? `${detailPedal.pedal.brand} ${detailPedal.pedal.model}` : 'Edit Pedal'}
@@ -1635,7 +1726,13 @@ export default function CollectionScreen() {
                           <Text style={styles.helperText}>Loading listings…</Text>
                         </View>
                       ) : wishlistError ? (
-                        <Text style={styles.helperText}>{wishlistError}</Text>
+                        <NetworkErrorView
+                          error={wishlistError}
+                          compact
+                          onRetry={() => {
+                            if (detailPedal) fetchWishlistListings(detailPedal, wishlistSort);
+                          }}
+                        />
                       ) : wishlistListings.length === 0 ? (
                         <Text style={styles.helperText}>No listings found right now.</Text>
                       ) : (
@@ -1657,7 +1754,13 @@ export default function CollectionScreen() {
                                 </Text>
                               </View>
                               <Text style={styles.wishlistPrice}>
-                                {l.price != null ? `${l.currency ?? '$'}${Math.round(l.price)}` : '—'}
+                                {l.price != null
+                                  ? new Intl.NumberFormat('en-US', {
+                                      style: 'currency',
+                                      currency: l.currency ?? 'USD',
+                                      maximumFractionDigits: 0,
+                                    }).format(l.price)
+                                  : '—'}
                               </Text>
                             </TouchableOpacity>
                           ))}
@@ -1708,7 +1811,7 @@ export default function CollectionScreen() {
                                 {paid != null && (
                                   <View style={styles.gearJourneyPLItem}>
                                     <Text style={styles.gearJourneyPLLabel}>Paid</Text>
-                                    <Text style={styles.gearJourneyPLAmount}>${paid.toLocaleString()}</Text>
+                                    <Text style={styles.gearJourneyPLAmount}>{fmt(paid)}</Text>
                                   </View>
                                 )}
                                 {paid != null && sold != null && (
@@ -1719,7 +1822,7 @@ export default function CollectionScreen() {
                                     <Text style={styles.gearJourneyPLLabel}>
                                       {detailPedal.retired_method === 'trade' ? 'Traded for' : 'Sold for'}
                                     </Text>
-                                    <Text style={styles.gearJourneyPLAmount}>${sold.toLocaleString()}</Text>
+                                    <Text style={styles.gearJourneyPLAmount}>{fmt(sold)}</Text>
                                   </View>
                                 )}
                                 {net !== null && (
@@ -1729,7 +1832,7 @@ export default function CollectionScreen() {
                                     <Text style={[styles.gearJourneyNetText, {
                                       color: net >= 0 ? colors.teal : colors.rose,
                                     }]}>
-                                      {net >= 0 ? '+' : ''}${net.toLocaleString()}
+                                      {fmtDelta(net)}
                                     </Text>
                                   </View>
                                 )}
@@ -1788,48 +1891,125 @@ export default function CollectionScreen() {
                   </View>
               </View>
 
-              {detailPedal?.status === 'owned' && (
-                <View style={styles.toggleRow}>
-                  <Text style={styles.fieldLabel}>On pedalboard</Text>
-                  <View style={styles.boardStatusValue}>
-                    <View
-                      style={[
-                        styles.boardStatusDot,
-                        { backgroundColor: detailBoard ? (boardColorMap[detailBoard.color ?? 'teal'] ?? colors.teal) : colors.border },
-                      ]}
-                    />
-                    <Text style={styles.boardStatusText}>
-                      {detailBoard ? detailBoard.name : 'None'}
-                    </Text>
-                  </View>
-                </View>
-              )}
-
               {detailPedal?.status === 'owned' && !showRetireSection && (
                 <>
-                  <Text style={styles.sectionLabel}>For Sale / For Trade</Text>
-                  <View style={styles.segmentedRow}>
-                    {([null, 'for_sale', 'for_trade', 'for_sale_or_trade'] as const).map(opt => (
-                      <TouchableOpacity
-                        key={String(opt)}
-                        style={[styles.segmentedButton, listingStatus === opt && styles.segmentedButtonActive]}
-                        onPress={() => { Haptics.selectionAsync(); setListingStatus(opt); }}
-                      >
-                        <Text style={[styles.segmentedText, listingStatus === opt && styles.segmentedTextActive]}>
-                          {opt === null ? 'Not Listed' : opt === 'for_sale' ? 'For Sale' : opt === 'for_trade' ? 'For Trade' : 'FS+FT'}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
+                  <Text style={styles.sectionLabel}>Current Status</Text>
+
+                  {/* Three status pills */}
+                  <View style={styles.statusPillRow}>
+                    {/* FS/FT pill */}
+                    <TouchableOpacity
+                      style={[styles.statusPill, listingStatus !== null && styles.statusPillActive]}
+                      onPress={() => {
+                        Haptics.selectionAsync();
+                        if (listingStatus !== null) {
+                          setListingStatus(null);
+                        } else {
+                          setListingStatus('for_sale');
+                        }
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons
+                        name="pricetag-outline"
+                        size={13}
+                        color={listingStatus !== null ? colors.teal : colors.textMuted}
+                      />
+                      <Text style={[styles.statusPillText, listingStatus !== null && styles.statusPillTextActive]}>
+                        FS/FT
+                      </Text>
+                    </TouchableOpacity>
+
+                    {/* On Loan pill */}
+                    <TouchableOpacity
+                      style={[styles.statusPill, isOnLoan && styles.statusPillActive]}
+                      onPress={() => {
+                        Haptics.selectionAsync();
+                        setIsOnLoan(prev => !prev);
+                        if (isOnLoan) setLoanedTo('');
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons
+                        name="swap-horizontal-outline"
+                        size={13}
+                        color={isOnLoan ? colors.teal : colors.textMuted}
+                      />
+                      <Text style={[styles.statusPillText, isOnLoan && styles.statusPillTextActive]}>
+                        On Loan
+                      </Text>
+                    </TouchableOpacity>
+
+                    {/* On Board pill — read-only, auto from board tab */}
+                    <View style={[styles.statusPill, detailBoard !== null && styles.statusPillActive, styles.statusPillReadOnly]}>
+                      <View
+                        style={[
+                          styles.statusPillBoardDot,
+                          { backgroundColor: detailBoard ? (boardColorMap[detailBoard.color ?? 'teal'] ?? colors.teal) : colors.textMuted },
+                        ]}
+                      />
+                      <Text style={[styles.statusPillText, detailBoard !== null && styles.statusPillTextActive]}>
+                        On Board
+                      </Text>
+                    </View>
                   </View>
-                  {(listingStatus === 'for_sale' || listingStatus === 'for_sale_or_trade') && (
-                    <TextInput
-                      style={styles.detailInput}
-                      placeholder="Asking price"
-                      keyboardType="decimal-pad"
-                      value={askingPrice}
-                      onChangeText={setAskingPrice}
-                      placeholderTextColor={colors.textMuted}
-                    />
+
+                  {/* FS/FT sub-section */}
+                  {listingStatus !== null && (
+                    <View style={styles.statusSubSection}>
+                      <View style={styles.segmentedRow}>
+                        {(['for_sale', 'for_trade', 'for_sale_or_trade'] as const).map(opt => (
+                          <TouchableOpacity
+                            key={opt}
+                            style={[styles.segmentedButton, listingStatus === opt && styles.segmentedButtonActive]}
+                            onPress={() => { Haptics.selectionAsync(); setListingStatus(opt); }}
+                          >
+                            <Text style={[styles.segmentedText, listingStatus === opt && styles.segmentedTextActive]}>
+                              {opt === 'for_sale' ? 'For Sale' : opt === 'for_trade' ? 'For Trade' : 'FS+FT'}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                      {(listingStatus === 'for_sale' || listingStatus === 'for_sale_or_trade') && (
+                        <TextInput
+                          style={[styles.detailInput, { marginTop: spacing.sm }]}
+                          placeholder="Asking price"
+                          keyboardType="decimal-pad"
+                          value={askingPrice}
+                          onChangeText={setAskingPrice}
+                          placeholderTextColor={colors.textMuted}
+                        />
+                      )}
+                    </View>
+                  )}
+
+                  {/* On Loan sub-section */}
+                  {isOnLoan && (
+                    <View style={styles.statusSubSection}>
+                      <TextInput
+                        style={styles.detailInput}
+                        placeholder="Who has it?"
+                        value={loanedTo}
+                        onChangeText={setLoanedTo}
+                        placeholderTextColor={colors.textMuted}
+                        autoCapitalize="words"
+                      />
+                    </View>
+                  )}
+
+                  {/* On Board info (read-only, shown when on a board) */}
+                  {detailBoard !== null && (
+                    <View style={styles.statusSubSection}>
+                      <View style={styles.boardStatusValue}>
+                        <View
+                          style={[
+                            styles.boardStatusDot,
+                            { backgroundColor: boardColorMap[detailBoard.color ?? 'teal'] ?? colors.teal },
+                          ]}
+                        />
+                        <Text style={styles.boardStatusText}>{detailBoard.name}</Text>
+                      </View>
+                    </View>
                   )}
                 </>
               )}
@@ -2104,7 +2284,7 @@ export default function CollectionScreen() {
                                       </View>
                                       {isFirst && node.acquired_method === 'purchase' && (
                                         <Text style={styles.traceCardMeta}>
-                                          💰 Paid {node.purchase_price != null ? `$${node.purchase_price}` : '—'}
+                                          💰 Paid {node.purchase_price != null ? fmt(node.purchase_price) : '—'}
                                           {node.acquired_from ? ` · ${node.acquired_from}` : ''}
                                         </Text>
                                       )}
@@ -2126,7 +2306,7 @@ export default function CollectionScreen() {
                                 return total > 0 ? (
                                   <View style={styles.traceTotalRow}>
                                     <Text style={styles.traceTotalLabel}>Total cash invested</Text>
-                                    <Text style={styles.traceTotalValue}>${total.toFixed(0)}</Text>
+                                    <Text style={styles.traceTotalValue}>{fmt(total)}</Text>
                                   </View>
                                 ) : null;
                               })()}
@@ -2134,7 +2314,7 @@ export default function CollectionScreen() {
                           ) : pedalChain.length === 1 && pedalChain[0].acquired_method === 'purchase' ? (
                             <View style={styles.traceCard}>
                               <Text style={styles.traceCardMeta}>
-                                💰 Purchased for {pedalChain[0].purchase_price != null ? `$${pedalChain[0].purchase_price}` : '—'}
+                                💰 Purchased for {pedalChain[0].purchase_price != null ? fmt(pedalChain[0].purchase_price) : '—'}
                                 {pedalChain[0].acquired_from ? ` · ${pedalChain[0].acquired_from}` : ''}
                               </Text>
                               {pedalChain[0].acquired_date ? (
@@ -2147,6 +2327,18 @@ export default function CollectionScreen() {
                             </Text>
                           )}
                         </View>
+                      )}
+
+                      {/* Reassign pedal — always accessible at the bottom */}
+                      {detailPedal && !showRetireSection && (
+                        <TouchableOpacity
+                          style={styles.reassignBtn}
+                          onPress={openReassign}
+                          activeOpacity={0.8}
+                        >
+                          <Ionicons name="swap-horizontal-outline" size={16} color={colors.textMuted} />
+                          <Text style={styles.reassignBtnText}>Reassign pedal</Text>
+                        </TouchableOpacity>
                       )}
 
                       {/* "Got it back" — shown for retired pedals regardless of showRetireSection */}
@@ -2356,7 +2548,7 @@ export default function CollectionScreen() {
                                             <Text style={styles.reverbBadgeText}>NEW</Text>
                                           </View>
                                           {r.avg_price != null && (
-                                            <Text style={styles.resultPrice}>~${r.avg_price}</Text>
+                                            <Text style={styles.resultPrice}>${r.avg_price}</Text>
                                           )}
                                         </View>
                                       </View>
@@ -2441,7 +2633,132 @@ export default function CollectionScreen() {
                 )}
               </TouchableOpacity>
             </View>
-          </View>
+            {/* ── Reassign overlay — lives inside the sheet to avoid nested-modal iOS issue ── */}
+            {showReassignModal && (
+              <View style={styles.reassignOverlay}>
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>Reassign Pedal</Text>
+                  <TouchableOpacity onPress={closeReassign} activeOpacity={0.7} style={{ padding: spacing.sm }}>
+                    <Ionicons name="close" size={20} color={colors.textMuted} />
+                  </TouchableOpacity>
+                </View>
+                {detailPedal?.pedal && (
+                  <View style={styles.reassignCurrentRow}>
+                    <Text style={styles.reassignCurrentLabel}>Currently:</Text>
+                    <Text style={styles.reassignCurrentPedal} numberOfLines={1}>
+                      {detailPedal.pedal.brand} {detailPedal.pedal.model}
+                    </Text>
+                  </View>
+                )}
+                <View style={styles.modalSearchRow}>
+                  <Ionicons name="search-outline" size={18} color={colors.textMuted} />
+                  <TextInput
+                    style={styles.modalSearchInput}
+                    placeholder="Search catalog…"
+                    placeholderTextColor={colors.textMuted}
+                    value={reassignQuery}
+                    onChangeText={handleReassignSearch}
+                    autoFocus
+                    returnKeyType="search"
+                    autoCorrect={false}
+                  />
+                  {reassignSearching
+                    ? <ActivityIndicator size="small" color={colors.teal} />
+                    : reassignQuery.length > 0
+                      ? <TouchableOpacity onPress={() => handleReassignSearch('')}>
+                          <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+                        </TouchableOpacity>
+                      : null
+                  }
+                </View>
+                <FlatList
+                  data={reassignResults}
+                  keyExtractor={item => item.id}
+                  keyboardShouldPersistTaps="handled"
+                  renderItem={({ item }) => {
+                    const isCurrent = detailPedal?.pedal_id === item.id;
+                    return (
+                      <TouchableOpacity
+                        style={[styles.resultRow, isCurrent && { opacity: 0.5 }]}
+                        onPress={() => !isCurrent && handleReassignPedal(item)}
+                        disabled={reassignSaving || isCurrent}
+                        activeOpacity={0.75}
+                      >
+                        <View style={styles.resultRowContent}>
+                          {item.image_url
+                            ? <Image source={{ uri: item.image_url }} style={styles.resultThumb} />
+                            : <View style={[styles.resultThumbPlaceholder, { backgroundColor: colors.background }]}>
+                                <Ionicons name="hardware-chip-outline" size={18} color={colors.textMuted} />
+                              </View>
+                          }
+                          <View style={styles.resultRowText}>
+                            <Text style={styles.resultBrand}>{item.brand}</Text>
+                            <Text style={styles.resultModel}>{item.model}</Text>
+                          </View>
+                          <View style={styles.resultRowRight}>
+                            <CategoryBadge category={item.category} small />
+                            {isCurrent
+                              ? <Text style={{ fontSize: typography.sizes.xs, fontFamily: typography.body, color: colors.textMuted, fontStyle: 'italic' }}>current</Text>
+                              : item.avg_price != null
+                                ? <Text style={styles.resultPrice}>{fmt(item.avg_price)}</Text>
+                                : null
+                            }
+                          </View>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  }}
+                  ListFooterComponent={
+                    <>
+                      {reassignReverbResults.length > 0 && (
+                        <>
+                          <View style={styles.reverbDivider}>
+                            <Text style={styles.reverbDividerText}>Also found on Reverb</Text>
+                          </View>
+                          {reassignReverbResults.map((r, i) => (
+                            <TouchableOpacity
+                              key={`reverb-${i}`}
+                              style={styles.resultRow}
+                              onPress={() => handleReassignSelectReverb(r)}
+                              disabled={reassignSaving}
+                              activeOpacity={0.7}
+                            >
+                              <View style={styles.resultRowContent}>
+                                {r.photo_url
+                                  ? <Image source={{ uri: r.photo_url }} style={styles.resultThumb} />
+                                  : <View style={[styles.resultThumbPlaceholder, { backgroundColor: colors.background }]}>
+                                      <Ionicons name="hardware-chip-outline" size={18} color={colors.textMuted} />
+                                    </View>
+                                }
+                                <View style={styles.resultRowText}>
+                                  <Text style={styles.resultBrand}>{r.brand}</Text>
+                                  <Text style={styles.resultModel}>{r.model}</Text>
+                                </View>
+                                <View style={styles.resultRowRight}>
+                                  <CategoryBadge category={r.category} small />
+                                  {r.avg_price != null && (
+                                    <Text style={styles.resultPrice}>{fmt(r.avg_price)}</Text>
+                                  )}
+                                </View>
+                              </View>
+                            </TouchableOpacity>
+                          ))}
+                        </>
+                      )}
+                      {reassignQuery.length > 0 && !reassignSearching && reassignResults.length === 0 && reassignReverbResults.length === 0 && (
+                        <Text style={styles.noResults}>No results found</Text>
+                      )}
+                    </>
+                  }
+                />
+                {reassignSaving && (
+                  <View style={StyleSheet.absoluteFillObject}>
+                    <ActivityIndicator color={colors.teal} style={{ flex: 1 }} />
+                  </View>
+                )}
+              </View>
+            )}
+          </SwipeDismissSheet>
         </KeyboardAvoidingView>
       </Modal>
 
@@ -2501,10 +2818,7 @@ export default function CollectionScreen() {
             activeOpacity={1}
             onPress={() => setShareConfigOpen(false)}
           />
-          <View style={styles.collectionModalSheet}>
-            {/* Handle */}
-            <View style={styles.collectionModalHandle} />
-
+          <SwipeDismissSheet style={styles.collectionModalSheet} onDismiss={() => setShareConfigOpen(false)}>
             {/* Header */}
             <View style={styles.collectionModalHeader}>
               <Text style={styles.collectionModalTitle}>{shareSource === 'gas' ? 'Share My GAS List' : 'Share My Collection'}</Text>
@@ -2552,7 +2866,7 @@ export default function CollectionScreen() {
                 {([
                   { key: 'none',   label: 'None'       },
                   { key: 'asking', label: 'Asking $'   },
-                  { key: 'market', label: '~Market'    },
+                  { key: 'market', label: 'Market'     },
                   { key: 'paid',   label: 'Paid $'     },
                 ] as { key: PriceMode; label: string }[]).map(opt => {
                   const active = sharePriceMode === opt.key;
@@ -2689,7 +3003,7 @@ export default function CollectionScreen() {
                 )}
               </TouchableOpacity>
             )}
-          </View>
+          </SwipeDismissSheet>
         </View>
       </Modal>
 
@@ -2737,6 +3051,7 @@ type ReverbResult = {
 function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPedalModalProps) {
   const ownedPedals = useStore(s => s.ownedPedals);
   const profile = useStore(s => s.profile);
+  const { fmt } = useFormatMoney();
   const detailScrollRef = useRef<ScrollView | null>(null);
   const tradeDetailsRef = useRef<View | null>(null);
   const [search, setSearch] = useState('');
@@ -2997,19 +3312,8 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
     setAddError('');
 
     try {
-      // Check for duplicate (retired allows multiples — users can re-own/re-sell)
-      const { data: existing } = await supabase
-        .from('user_pedals')
-        .select('id')
-        .eq('user_id', liveSession.user.id)
-        .eq('pedal_id', selectedPedal.id)
-        .eq('status', status)
-        .maybeSingle();
-
-      if (existing) {
-        setAddError('You already have this pedal in your ' + status + ' list.');
-        return;
-      }
+      // Multiples are allowed for all statuses — players have backup boards, multiple
+      // colorways, and may wishlist the same pedal in different variants.
 
       const parsedPrice = pricePaid ? parseFloat(pricePaid) : null;
       if (acquisitionType === 'wishlist' && !parsedPrice) {
@@ -3068,8 +3372,9 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
       }
 
       if (error) {
-        setAddError(error.message);
-        Alert.alert('Save failed', error.message);
+        const classified = classifyError(error, { httpStatus: extractHttpStatus(error) });
+        setAddError(classified.message);
+        Alert.alert(classified.title, classified.message);
         return;
       }
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -3103,7 +3408,8 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
     });
     setIsAdding(false);
     if (error) {
-      setAddError(error.message);
+      const classified = classifyError(error, { httpStatus: extractHttpStatus(error) });
+      setAddError(classified.message);
     } else {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       onAdded(selectedPedal?.brand, selectedPedal?.model, false); // retired — no owned share nudge
@@ -3174,9 +3480,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
         keyboardVerticalOffset={0}
       >
         <TouchableOpacity style={styles.modalBackdrop} onPress={handleClose} activeOpacity={1} />
-        <View style={styles.modalSheet}>
-          {/* Handle */}
-          <View style={styles.modalHandle} />
+        <SwipeDismissSheet style={styles.modalSheet} onDismiss={handleClose}>
 
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Add Pedal</Text>
@@ -3240,7 +3544,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
                   <Text style={styles.selectedPedalBrand}>{selectedPedal.brand}</Text>
                   <Text style={styles.selectedPedalModel}>{selectedPedal.model}</Text>
                   {selectedPedal.avg_price && (
-                    <Text style={styles.selectedPedalPrice}>~${selectedPedal.avg_price}</Text>
+                    <Text style={styles.selectedPedalPrice}>${selectedPedal.avg_price}</Text>
                   )}
                 </View>
                 <TouchableOpacity onPress={() => { setSelectedPedal(null); setColorways([]); setSelectedColorwayId(null); }}>
@@ -3636,14 +3940,21 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
                   activeOpacity={0.7}
                 >
                   <View style={styles.resultRowContent}>
+                    {pedal.image_url ? (
+                      <Image source={{ uri: pedal.image_url }} style={styles.resultThumb} />
+                    ) : (
+                      <View style={[styles.resultThumbPlaceholder, { backgroundColor: colors.surface }]}>
+                        <Ionicons name="hardware-chip-outline" size={18} color={colors.textMuted} />
+                      </View>
+                    )}
                     <View style={styles.resultRowText}>
                       <Text style={styles.resultBrand}>{pedal.brand}</Text>
                       <Text style={styles.resultModel}>{pedal.model}</Text>
                     </View>
                     <View style={styles.resultRowRight}>
                       <CategoryBadge category={pedal.category} small />
-                      {pedal.avg_price && (
-                        <Text style={styles.resultPrice}>${pedal.avg_price}</Text>
+                      {pedal.avg_price != null && (
+                        <Text style={styles.resultPrice}>{fmt(pedal.avg_price)}</Text>
                       )}
                     </View>
                   </View>
@@ -3666,6 +3977,13 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
                       activeOpacity={0.7}
                     >
                       <View style={styles.resultRowContent}>
+                        {r.photo_url ? (
+                          <Image source={{ uri: r.photo_url }} style={styles.resultThumb} />
+                        ) : (
+                          <View style={[styles.resultThumbPlaceholder, { backgroundColor: colors.surface }]}>
+                            <Ionicons name="hardware-chip-outline" size={18} color={colors.textMuted} />
+                          </View>
+                        )}
                         <View style={styles.resultRowText}>
                           <Text style={styles.resultBrand}>{r.brand}</Text>
                           <Text style={styles.resultModel}>{r.model}</Text>
@@ -3673,10 +3991,10 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
                         <View style={styles.resultRowRight}>
                           <CategoryBadge category={r.category} small />
                           <View style={styles.reverbBadge}>
-                            <Text style={styles.reverbBadgeText}>NEW</Text>
+                            <Text style={styles.reverbBadgeText}>REVERB</Text>
                           </View>
                           {r.avg_price != null && (
-                            <Text style={styles.resultPrice}>~${r.avg_price}</Text>
+                            <Text style={styles.resultPrice}>{fmt(r.avg_price)}</Text>
                           )}
                         </View>
                       </View>
@@ -3686,7 +4004,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
               )}
             </ScrollView>
           )}
-        </View>
+        </SwipeDismissSheet>
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -4284,6 +4602,49 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     marginTop: spacing.xs,
   },
+  statusPillRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  statusPill: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    height: 38,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  statusPillActive: {
+    backgroundColor: colors.teal + '1A',
+    borderColor: colors.teal + '80',
+  },
+  statusPillReadOnly: {
+    opacity: 0.85,
+  },
+  statusPillText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodyMedium,
+    color: colors.textMuted,
+  },
+  statusPillTextActive: {
+    color: colors.teal,
+  },
+  statusPillBoardDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  statusSubSection: {
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
   segmentedButton: {
     flex: 1,
     height: 40,
@@ -4446,6 +4807,24 @@ const styles = StyleSheet.create({
     fontFamily: typography.bodyMedium,
     color: colors.teal,
   },
+  reassignBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    height: 44,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.lg,
+    paddingVertical: 10,
+    paddingHorizontal: spacing.md,
+    marginTop: spacing.sm,
+  },
+  reassignBtnText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodyMedium,
+    color: colors.textMuted,
+  },
   detailDangerRow: {
     flexDirection: 'row',
     gap: spacing.sm,
@@ -4480,10 +4859,27 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  resultThumb: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+    flexShrink: 0,
+  },
+  resultThumbPlaceholder: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
   },
   resultRowText: {
     flex: 1,
-    marginRight: spacing.md,
   },
   resultBrand: {
     fontSize: typography.sizes.xs,
@@ -5323,5 +5719,39 @@ const styles = StyleSheet.create({
   gearJourneyNetText: {
     fontSize: typography.sizes.sm,
     fontFamily: typography.bodySemiBold,
+  },
+  reassignOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    paddingHorizontal: spacing.base,
+    paddingBottom: 24,
+    zIndex: 10,
+  },
+  reassignCurrentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    backgroundColor: colors.background,
+    borderRadius: radius.md,
+    marginBottom: spacing.sm,
+  },
+  reassignCurrentLabel: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+  },
+  reassignCurrentPedal: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textPrimary,
+    flexShrink: 1,
   },
 });

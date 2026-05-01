@@ -28,9 +28,21 @@ import { hasBetaFullAccess } from '../lib/subscription';
 import { useMessageGate } from '../hooks/useMessageGate';
 import { loadMemory, refreshMemory } from '../lib/memory';
 import { reverbSearchUrl } from '../lib/reverb';
-import { invokeEdgeFunction } from '../lib/supabase';
+import {
+  invokeEdgeFunction,
+  createConversation,
+  updateConversation,
+  fetchConversation,
+  fetchConversations,
+  type ConversationMessage,
+} from '../lib/supabase';
 import { shareAdvisorResponse } from '../lib/share';
 import { weeklyPickCountdownLabel } from '../lib/notifications';
+import { useRoute, RouteProp } from '@react-navigation/native';
+import { AIStackParamList, RootStackParamList } from '../types/navigation';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { SwipeDismissSheet } from '../components/SwipeDismissSheet';
+import { classifyError } from '../lib/networkError';
 
 type ChatMessage = Message & {
   id: string;
@@ -42,9 +54,10 @@ const SURFACE_GRADIENT: [string, string] = ['#FFFFFF', '#F7F4F0'];
 
 export default function AdvisorScreen() {
   const insets = useSafeAreaInsets();
-  const navigation = useNavigation();
-  // Only show back button when we're not at the root of the AIStack
-  // (canGoBack() checks the whole tree and would pop back to the Home tab)
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+  const route = useRoute<RouteProp<AIStackParamList, 'Advisor'>>();
+  const resumeConversationId = route.params?.conversationId;
+
   const { session, ownedPedals, wishlistPedals, retiredPedals, boards, profile, openPaywall, weeklyPick, weeklyPickLoading, fetchWeeklyPick, addToWishlist } = useStore();
 
   const isPro = Boolean(profile?.is_premium) || hasBetaFullAccess();
@@ -54,13 +67,60 @@ export default function AdvisorScreen() {
   const [isThinking, setIsThinking] = useState(false);
   const [sessionWarning, setSessionWarning] = useState<string | null>(null);
   const [memory, setMemory] = useState('');
+  const [queuedCount, setQueuedCount] = useState(0);
   const [showWeeklyDetail, setShowWeeklyDetail] = useState(false);
   const [weeklyWishlistState, setWeeklyWishlistState] = useState<'idle' | 'loading' | 'added' | 'exists'>('idle');
+
+  // ── Conversation persistence (Pro only) ────────────────────────────────────
+  const conversationIdRef = useRef<string | null>(resumeConversationId ?? null);
+  const [recentConvTitles, setRecentConvTitles] = useState<string[]>([]);
+
+  // Load resumed conversation whenever conversationId param changes
+  useEffect(() => {
+    if (!resumeConversationId || !isPro) {
+      // Fresh chat — clear any prior conversation ref
+      if (!resumeConversationId) conversationIdRef.current = null;
+      return;
+    }
+    conversationIdRef.current = resumeConversationId;
+    fetchConversation(resumeConversationId).then(conv => {
+      if (!conv) return;
+      const loaded: ChatMessage[] = conv.messages.map((m, i) => ({
+        id: `loaded-${i}`,
+        role: m.role,
+        content: m.content,
+      }));
+      setMessages(loaded);
+      setSessionWarning(null);
+      setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: false }), 100);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeConversationId]);
+
+  // Load recent conversation titles for system-prompt context enrichment (Pro)
+  useEffect(() => {
+    if (!isPro || !session?.user?.id) return;
+    fetchConversations(session.user.id).then(convs => {
+      const titles = convs.slice(0, 5).map(c => c.title).filter(Boolean);
+      setRecentConvTitles(titles);
+    }).catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPro, session?.user?.id]);
+  // ──────────────────────────────────────────────────────────────────────────
   const memoryRef = useRef('');
   const communitySignalsRef = useRef('');
   const scrollViewRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   const dotAnim = useRef(new Animated.Value(0)).current;
+  // Double-submit guard (ref = synchronous, no stale-closure issues)
+  const isSubmittingRef = useRef(false);
+  // Message queue for sending while a response is in flight
+  const messageQueue = useRef<string[]>([]);
+  // Stable ref to latest sendMessage — used to drain queue from inside callbacks
+  const sendMessageRef = useRef<((text: string) => void) | null>(null);
+  // Keep messagesRef current so queue-drain calls build correct history
+  const messagesRef = useRef<ChatMessage[]>(messages);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   // Load player memory on mount
   useEffect(() => {
@@ -118,6 +178,7 @@ export default function AdvisorScreen() {
     boards.length,
     memoryRef.current,
     communitySignalsRef.current,
+    isPro ? recentConvTitles : [],   // Pro: enrich AI with past topics
   // eslint-disable-next-line react-hooks/exhaustive-deps
   ), [
     ownedPedals.length,
@@ -126,6 +187,7 @@ export default function AdvisorScreen() {
     boards.length,
     profile?.pedal_expert_profile,
     memory, // triggers re-build after memory loads from Supabase
+    recentConvTitles,
   ]);
 
   const scrollToBottom = useCallback((animated = true) => {
@@ -135,60 +197,78 @@ export default function AdvisorScreen() {
   }, []);
 
   const sendMessage = useCallback(async (text: string) => {
-    if (!text.trim() || isThinking) return;
+    if (!text.trim()) return;
 
-    // ── Usage gate (server-side) ─────────────────────────────────────────────
-    // Beta users bypass the server gate — they always have full access.
-    if (!hasBetaFullAccess()) {
-      const gate = await checkGate();
-      if (!gate.allowed) {
-        if (gate.error === 'pro_required') {
-          openPaywall('advisor');
-          return;
-        } else if (gate.error === 'messages_depleted') {
-          setSessionWarning("You've used all 50 messages this month and have no bonus credits left.");
-          return;
-        }
-        // network_error: fail open — don't silently block the user
-      }
+    // If a response is already in flight, queue this message and return immediately.
+    // isSubmittingRef is a synchronous ref so rapid double-taps all see it set.
+    if (isSubmittingRef.current) {
+      messageQueue.current.push(text.trim());
+      setQueuedCount(c => c + 1);
+      setInput('');
+      Haptics.selectionAsync();
+      return;
     }
-    // Clear any previous warning once a message goes through
-    setSessionWarning(null);
-    // ────────────────────────────────────────────────────────────────────────
+    isSubmittingRef.current = true;
 
+    // Immediately show the user's bubble and disable the send button.
+    // Doing this before the async gate check gives instant visual feedback,
+    // preventing impatient re-taps while waiting for the network round-trip.
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
       role: 'user',
       content: text.trim(),
     };
-
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setIsThinking(true);
     scrollToBottom();
     Haptics.selectionAsync();
 
-    // Build conversation history for API (exclude streaming placeholders).
-    // Cap at the last 20 messages (10 turns) to bound token costs on long sessions.
-    // Prompt caching on the system prompt already covers the static context.
+    // ── Usage gate (server-side) ─────────────────────────────────────────────
+    if (!hasBetaFullAccess()) {
+      const gate = await checkGate();
+      if (!gate.allowed) {
+        // Undo the optimistic UI and restore the draft
+        setMessages(prev => prev.filter(m => m.id !== userMessage.id));
+        setInput(text.trim());
+        setIsThinking(false);
+        isSubmittingRef.current = false;
+        if (gate.error === 'pro_required') {
+          openPaywall('advisor');
+          return;
+        } else if (gate.error === 'messages_depleted') {
+          setSessionWarning("You've used all 100 messages this month and have no bonus credits left.");
+          return;
+        }
+        // network_error: fail open — UI restored so user can retry manually
+        return;
+      }
+    }
+    setSessionWarning(null);
+    // ────────────────────────────────────────────────────────────────────────
+
+    // Build history from the ref so queue-drain calls always get up-to-date context.
     const MAX_HISTORY = 20;
-    const history: Message[] = [...messages, userMessage]
+    const history: Message[] = [...messagesRef.current, userMessage]
       .slice(-MAX_HISTORY)
       .map(m => ({ role: m.role, content: m.content }));
 
     const assistantId = (Date.now() + 1).toString();
     let accumulated = '';
 
-    // Add empty assistant message that we'll stream into
     setMessages(prev => [
       ...prev,
-      {
-        id: assistantId,
-        role: 'assistant',
-        content: '',
-        isStreaming: true,
-      },
+      { id: assistantId, role: 'assistant', content: '', isStreaming: true },
     ]);
+
+    const drainQueue = () => {
+      isSubmittingRef.current = false;
+      const next = messageQueue.current.shift();
+      if (next) {
+        setQueuedCount(c => Math.max(0, c - 1));
+        sendMessageRef.current?.(next);
+      }
+    };
 
     await askClaude(history, systemPrompt, (chunk) => {
       if (chunk.type === 'text' && chunk.text) {
@@ -220,22 +300,49 @@ export default function AdvisorScreen() {
             assistantMessage: accumulated,
           }).catch(() => {});
         }
+
+        // Persist conversation for Pro users (non-blocking)
+        if (isPro && session?.user?.id) {
+          setMessages(prev => {
+            const snapshot: ConversationMessage[] = prev
+              .filter(m => !m.isStreaming || m.content.trim())
+              .map(m => ({ role: m.role, content: m.content }));
+            if (!conversationIdRef.current) {
+              const rawTitle = text.trim().slice(0, 60);
+              const title = rawTitle.charAt(0).toUpperCase() + rawTitle.slice(1);
+              createConversation(session.user.id!, title, snapshot)
+                .then(id => { conversationIdRef.current = id; })
+                .catch(() => {});
+            } else {
+              updateConversation(conversationIdRef.current, snapshot).catch(() => {});
+            }
+            return prev;
+          });
+        }
+
+        drainQueue();
       } else if (chunk.type === 'error') {
+        const classified = classifyError(chunk.error);
+        const errorContent = classified.type === 'offline'
+          ? "You appear to be offline — reconnect and try again."
+          : classified.type === 'server'
+          ? "Having trouble reaching the server. Try again in a moment."
+          : chunk.error ?? 'Something went wrong. Please try again.';
         setMessages(prev =>
           prev.map(m =>
             m.id === assistantId
-              ? {
-                  ...m,
-                  content: chunk.error ?? 'Something went wrong. Please try again.',
-                  isStreaming: false,
-                }
+              ? { ...m, content: errorContent, isStreaming: false }
               : m
           )
         );
         setIsThinking(false);
+        drainQueue();
       }
-    }, { enableWebSearch: isPro, maxTokens: 1400 });
-  }, [messages, isThinking, ownedPedals, wishlistPedals, retiredPedals, profile, boards, isPro, openPaywall, scrollToBottom, session]);
+    }, { enableWebSearch: true, maxTokens: 1400 });
+  }, [ownedPedals, wishlistPedals, retiredPedals, profile, boards, isPro, openPaywall, scrollToBottom, session, systemPrompt, checkGate]);
+
+  // Keep the ref current so drainQueue can always call the latest version
+  useEffect(() => { sendMessageRef.current = sendMessage; }, [sendMessage]);
 
   const handleStarterPrompt = (prompt: string) => {
     sendMessage(prompt);
@@ -271,6 +378,35 @@ export default function AdvisorScreen() {
               Powered by Claude · Knows your collection
             </Text>
           </View>
+          {/* Pro: new chat + history buttons */}
+          {isPro && (
+            <View style={styles.headerActions}>
+              {messages.length > 0 && (
+                <TouchableOpacity
+                  style={styles.headerActionBtn}
+                  onPress={() => {
+                    Haptics.selectionAsync();
+                    conversationIdRef.current = null;
+                    setMessages([]);
+                    setSessionWarning(null);
+                  }}
+                  hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+                >
+                  <Ionicons name="add-circle-outline" size={22} color={colors.teal} />
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                style={styles.headerActionBtn}
+                onPress={() => {
+                  Haptics.selectionAsync();
+                  (navigation as any).navigate('ChatHistory');
+                }}
+                hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+              >
+                <Ionicons name="time-outline" size={22} color={colors.teal} />
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
 
         {/* Collection context pill */}
@@ -352,31 +488,47 @@ export default function AdvisorScreen() {
 
       {/* Input */}
       <View style={[styles.inputContainer, { paddingBottom: insets.bottom + 8 }]}>
+        {queuedCount > 0 && (
+          <View style={styles.queueBanner}>
+            <Ionicons name="time-outline" size={12} color={colors.teal} />
+            <Text style={styles.queueBannerText}>
+              {queuedCount} message{queuedCount > 1 ? 's' : ''} queued · sending when ready
+            </Text>
+          </View>
+        )}
         <View style={styles.inputRow}>
           <TextInput
             ref={inputRef}
             style={styles.input}
             value={input}
             onChangeText={setInput}
-            placeholder="Ask about tone, a song, your board..."
+            placeholder={isThinking ? "Type next message — it'll queue..." : "Ask about tone, a song, your board..."}
             placeholderTextColor={colors.textMuted}
             multiline
             maxLength={500}
             returnKeyType="send"
             onSubmitEditing={() => sendMessage(input)}
             blurOnSubmit={false}
-            editable={!isThinking}
           />
           <TouchableOpacity
             onPress={() => sendMessage(input)}
-            disabled={!input.trim() || isThinking}
+            disabled={!input.trim()}
             activeOpacity={0.8}
           >
             <LinearGradient
-              colors={input.trim() && !isThinking ? TEAL_GRADIENT : ['#E2DDD7', '#E2DDD7']}
+              colors={
+                !input.trim()
+                  ? ['#E2DDD7', '#E2DDD7']
+                  : isThinking
+                  ? [colors.gold, colors.goldDark]
+                  : TEAL_GRADIENT
+              }
               style={styles.sendButton}
             >
-              <Text style={styles.sendButtonIcon}>↑</Text>
+              {isThinking && input.trim()
+                ? <Ionicons name="time-outline" size={20} color="#fff" />
+                : <Text style={styles.sendButtonIcon}>↑</Text>
+              }
             </LinearGradient>
           </TouchableOpacity>
         </View>
@@ -396,8 +548,7 @@ export default function AdvisorScreen() {
       >
         <View style={styles.detailOverlay}>
           <TouchableOpacity style={styles.detailBackdrop} activeOpacity={1} onPress={() => setShowWeeklyDetail(false)} />
-          <View style={[styles.detailSheet, { paddingBottom: insets.bottom + 24 }]}>
-            <View style={styles.detailHandle} />
+          <SwipeDismissSheet style={[styles.detailSheet, { paddingBottom: insets.bottom + 24 }]} onDismiss={() => setShowWeeklyDetail(false)}>
             <View style={styles.detailHeader}>
               <View style={styles.detailTitleRow}>
                 <Ionicons name="sparkles" size={15} color={colors.gold} />
@@ -469,7 +620,7 @@ export default function AdvisorScreen() {
                 )}
               </TouchableOpacity>
             </View>
-          </View>
+          </SwipeDismissSheet>
         </View>
       </Modal>
     )}
@@ -829,6 +980,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.md,
   },
+  headerActions: {
+    marginLeft: 'auto',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  headerActionBtn: {
+    padding: spacing.xs,
+  },
   advisorIcon: {
     position: 'relative',
   },
@@ -1022,6 +1182,18 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     paddingTop: spacing.sm,
     paddingHorizontal: spacing.base,
+  },
+  queueBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginBottom: spacing.xs,
+    paddingHorizontal: spacing.xs,
+  },
+  queueBannerText: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.bodyMedium,
+    color: colors.teal,
   },
   inputRow: {
     flexDirection: 'row',

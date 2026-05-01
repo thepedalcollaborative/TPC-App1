@@ -26,8 +26,12 @@
 // Secret:  npx supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+
+// Rate limiting is handled via the persistent check_rate_limit() RPC in Postgres.
+// This survives cold starts and concurrent invocations unlike an in-memory Map.
 
 // Whitelist prevents clients from requesting arbitrary models
 const ALLOWED_MODELS = new Set([
@@ -69,11 +73,104 @@ serve(async (req) => {
     } = await req.json();
 
     const apiKey = Deno.env.get('ANTHROPIC_API_KEY');
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+    const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
     if (!apiKey) {
       return new Response(
         JSON.stringify({ error: 'Advisor is not configured.' }),
         { status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
       );
+    }
+    if (!supabaseUrl || !anonKey || !serviceRoleKey) {
+      return new Response(
+        JSON.stringify({ error: 'Server auth is not configured.' }),
+        { status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const userClient = createClient(supabaseUrl, anonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const { data: { user }, error: authError } = await userClient.auth.getUser();
+    if (authError || !user) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // ── Input validation ──────────────────────────────────────────────────────
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid messages payload.' }),
+        { status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+      );
+    }
+    const totalChars = messages.reduce((sum: number, m: { content?: unknown }) =>
+      sum + (typeof m.content === 'string' ? m.content.length : 0), 0);
+    if (totalChars > 12000) {
+      return new Response(
+        JSON.stringify({ error: 'Conversation payload too large.' }),
+        { status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // ── Admin client (service-role) ───────────────────────────────────────────
+    const adminClient = createClient(supabaseUrl, serviceRoleKey);
+
+    // ── Rate limit check (persistent — survives cold starts) ──────────────────
+    // Limit: 30 requests per 60-second window per user.
+    const { data: allowed, error: rlErr } = await adminClient.rpc('check_rate_limit', {
+      p_user_id:        user.id,
+      p_endpoint:       'tpc-advisor',
+      p_limit:          30,
+      p_window_seconds: 60,
+    });
+    if (rlErr) {
+      console.error('[tpc-advisor] rate limit check error:', rlErr.message);
+    } else if (!allowed) {
+      return new Response(
+        JSON.stringify({ error: 'Rate limit exceeded. Please wait a moment before sending more messages.' }),
+        { status: 429, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const allowWebSearch = Boolean(enableWebSearch);
+
+    // ── Recent pedals feed ────────────────────────────────────────────────────
+    // Inject a compact "recently trending" block into the system prompt so
+    // Claude has real-time awareness of new gear without burning a search call.
+    let recentPedalsFeed = '';
+    try {
+      const { data: recentPedals } = await adminClient
+        .from('recent_pedals')
+        .select('brand, model, category, avg_price, listing_count')
+        .gt('last_seen_at', new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString())
+        .order('listing_count', { ascending: false })
+        .limit(40);
+
+      if (recentPedals && recentPedals.length > 0) {
+        const lines = recentPedals.map((p: {
+          brand: string; model: string; category: string | null;
+          avg_price: number | null; listing_count: number;
+        }) => {
+          const price = p.avg_price ? ` ~$${p.avg_price}` : '';
+          const cat = p.category ? ` [${p.category}]` : '';
+          return `• ${p.brand} ${p.model}${cat}${price} (${p.listing_count} listings)`;
+        }).join('\n');
+        recentPedalsFeed = `\n\nRECENTLY ACTIVE ON REVERB (last 60 days — use this for current awareness):\n${lines}`;
+      }
+    } catch (e) {
+      console.warn('[tpc-advisor] recent_pedals fetch failed:', (e as Error).message);
     }
 
     const model = (requestedModel && ALLOWED_MODELS.has(requestedModel))
@@ -83,23 +180,25 @@ serve(async (req) => {
     // Merge client-supplied tools with web search when requested
     const allTools = [
       ...(clientTools ?? []),
-      ...(enableWebSearch ? [WEB_SEARCH_TOOL] : []),
+      ...(allowWebSearch ? [WEB_SEARCH_TOOL] : []),
     ];
     const hasTools = allTools.length > 0;
 
     // Don't stream when tools are present — full body needed for tool responses
     const shouldStream = stream && !hasTools;
 
-    // Wrap system prompt in a caching block. The large static context
-    // (gear knowledge base + catalog summary) is the same across all turns,
-    // so it benefits heavily from caching.
+    // Wrap system prompt in a caching block. Static context is cached;
+    // the small dynamic recentPedalsFeed suffix is appended outside the cache.
     const systemBlock = systemPrompt
-      ? [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }]
+      ? [
+          { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
+          ...(recentPedalsFeed ? [{ type: 'text', text: recentPedalsFeed }] : []),
+        ]
       : undefined;
 
     // Beta flags: always enable prompt caching; add web search when needed
     const betaFlags = ['prompt-caching-2024-07-31'];
-    if (enableWebSearch) betaFlags.push('web-search-2025-03-05');
+    if (allowWebSearch) betaFlags.push('web-search-2025-03-05');
 
     // ── Agentic loop ───────────────────────────────────────────────────────────
     // For built-in server-side tools (web_search_20250305), Anthropic handles

@@ -212,6 +212,7 @@ export type UserPedal = {
   listing_status: 'for_sale' | 'for_trade' | 'for_sale_or_trade' | null;
   asking_price: number | null;
   trade_wants: string | null;
+  loaned_to: string | null;
   created_at: string;
   pedal?: Pedal;
   colorway?: PedalColorway;
@@ -274,3 +275,82 @@ export type UserProfile = {
   pedal_expert_profile: FullExpertProfile | null;
   created_at: string;
 };
+
+// ─── Conversation history (Pro users) ────────────────────────────────────────
+
+export type ConversationMessage = {
+  role: 'user' | 'assistant';
+  content: string;
+};
+
+export type Conversation = {
+  id: string;
+  user_id: string;
+  title: string;
+  messages: ConversationMessage[];
+  last_message_preview: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Create a new conversation row and return its id */
+export async function createConversation(
+  userId: string,
+  title: string,
+  messages: ConversationMessage[],
+): Promise<string | null> {
+  const preview = messages.findLast(m => m.role === 'assistant')?.content?.slice(0, 120) ?? null;
+  const { data, error } = await supabase
+    .from('conversations')
+    .insert({
+      user_id: userId,
+      title,
+      messages,
+      last_message_preview: preview,
+    })
+    .select('id')
+    .single();
+  if (error) { if (__DEV__) console.warn('[conversations] create error:', error); return null; }
+  return data?.id ?? null;
+}
+
+/** Append new messages to an existing conversation */
+export async function updateConversation(
+  id: string,
+  messages: ConversationMessage[],
+): Promise<void> {
+  const preview = messages.findLast(m => m.role === 'assistant')?.content?.slice(0, 120) ?? null;
+  const { error } = await supabase
+    .from('conversations')
+    .update({ messages, last_message_preview: preview })
+    .eq('id', id);
+  if (error && __DEV__) console.warn('[conversations] update error:', error);
+}
+
+/** Load all conversations for a user, newest first */
+export async function fetchConversations(userId: string): Promise<Conversation[]> {
+  const { data, error } = await supabase
+    .from('conversations')
+    .select('*')
+    .eq('user_id', userId)
+    .order('updated_at', { ascending: false })
+    .limit(50);
+  if (error) { if (__DEV__) console.warn('[conversations] fetch error:', error); return []; }
+  return (data ?? []) as Conversation[];
+}
+
+/** Load a single conversation by id */
+export async function fetchConversation(id: string): Promise<Conversation | null> {
+  const { data, error } = await supabase
+    .from('conversations')
+    .select('*')
+    .eq('id', id)
+    .single();
+  if (error) { if (__DEV__) console.warn('[conversations] fetchOne error:', error); return null; }
+  return data as Conversation;
+}
+
+/** Delete a conversation */
+export async function deleteConversation(id: string): Promise<void> {
+  await supabase.from('conversations').delete().eq('id', id);
+}

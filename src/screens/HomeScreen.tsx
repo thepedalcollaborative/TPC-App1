@@ -9,6 +9,7 @@ import {
   Modal,
   Linking,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
@@ -24,15 +25,25 @@ import {
   SectionHeader,
   MiniPedalCard,
   EmptyState,
+  SocialShareSheet,
 } from '../components';
+import { SwipeDismissSheet } from '../components/SwipeDismissSheet';
 import { RootStackParamList, HomeStackParamList, TabParamList } from '../types/navigation';
-import { shareVaultMilestone } from '../lib/share';
 import { HiddenShareCard } from '../components/ShareCard';
 import { useShareCard } from '../lib/useShareCard';
 import { hasBetaFullAccess } from '../lib/subscription';
-import { supabase, UserProfile } from '../lib/supabase';
+import { supabase, UserProfile, invokeEdgeFunction } from '../lib/supabase';
 import { reverbSearchUrl } from '../lib/reverb';
 import { weeklyPickCountdownLabel } from '../lib/notifications';
+import { useFormatMoney } from '../hooks/useFormatMoney';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+interface LatestVideo {
+  id: string;
+  title: string;
+  thumbnail: string;
+  publishedAt: string;
+}
 
 // ─── Milestone modal ──────────────────────────────────────────────────────────
 function MilestoneModal({
@@ -48,6 +59,8 @@ function MilestoneModal({
 }) {
   const insets = useSafeAreaInsets();
   const { cardRef: msCardRef, cardData: msCardData, triggerShare: msTriggerShare } = useShareCard();
+  const [msShareOpen, setMsShareOpen] = useState(false);
+  const { fmt } = useFormatMoney();
   const emoji = milestone >= 50 ? '🏆' : milestone >= 25 ? '🎸' : milestone >= 10 ? '🎛' : '🎉';
   const label = milestone >= 50 ? "You're a serious collector."
               : milestone >= 25 ? "That's a real collection."
@@ -65,7 +78,7 @@ function MilestoneModal({
           {totalMarketValue > 0 && (
             <View style={msStyles.valueRow}>
               <Text style={msStyles.valueSub}>Estimated collection value</Text>
-              <Text style={msStyles.valueNum}>${totalMarketValue.toLocaleString()}</Text>
+              <Text style={msStyles.valueNum}>{fmt(totalMarketValue)}</Text>
             </View>
           )}
 
@@ -83,29 +96,35 @@ function MilestoneModal({
             </LinearGradient>
           </TouchableOpacity>
 
-          {/* Share milestone — image card (Instagram/TikTok) + text fallback */}
-          <View style={msStyles.shareRow}>
-            <TouchableOpacity
-              onPress={() => {
-                Haptics.selectionAsync();
-                msTriggerShare({ type: 'milestone', count: milestone, marketValue: totalMarketValue });
-              }}
-              style={msStyles.shareImgBtn}
-              activeOpacity={0.75}
-            >
-              <Ionicons name="share-social-outline" size={15} color={colors.teal} />
-              <Text style={msStyles.shareImgText}>Share as Image</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => { Haptics.selectionAsync(); shareVaultMilestone(milestone, totalMarketValue); }}
-              style={msStyles.shareBtn}
-              activeOpacity={0.75}
-            >
-              <Ionicons name="share-outline" size={14} color={colors.textMuted} />
-              <Text style={msStyles.shareText}>Text</Text>
-            </TouchableOpacity>
-          </View>
+          {/* Share milestone — share the raw USD value regardless of bliss mode */}
+          <TouchableOpacity
+            onPress={() => { Haptics.selectionAsync(); setMsShareOpen(true); }}
+            style={msStyles.shareImgBtn}
+            activeOpacity={0.75}
+          >
+            <Ionicons name="share-social-outline" size={15} color={colors.teal} />
+            <Text style={msStyles.shareImgText}>Share</Text>
+          </TouchableOpacity>
           <HiddenShareCard cardRef={msCardRef} cardData={msCardData} />
+          <SocialShareSheet
+            visible={msShareOpen}
+            onClose={() => setMsShareOpen(false)}
+            text={[
+              milestone >= 50 ? `I'm a serious collector now 🏆` :
+              milestone >= 25 ? `That's a real collection 🎸` :
+              milestone >= 10 ? `My vault is filling up 🎛` :
+              `Officially a collector 🎉`,
+              '',
+              `${milestone} pedals in my TPC vault.`,
+              totalMarketValue > 0 ? `Est. value: $${Math.round(totalMarketValue).toLocaleString()}` : null,
+              '',
+              `Track yours → https://thepedalcollaborative.com`,
+              '',
+              '#guitarpedals #pedalboard #tonehunter',
+            ].filter(Boolean).join('\n')}
+            xText={`${milestone} pedals in my TPC vault 🎸 #guitarpedals #pedalboard`}
+            onImageShare={() => msTriggerShare({ type: 'milestone', count: milestone, marketValue: totalMarketValue })}
+          />
 
           <TouchableOpacity onPress={onClose} style={msStyles.dismiss}>
             <Text style={msStyles.dismissText}>Not now</Text>
@@ -115,6 +134,127 @@ function MilestoneModal({
     </Modal>
   );
 }
+
+// ─── Value Milestone modal ────────────────────────────────────────────────────
+function ValueMilestoneModal({
+  value,
+  onClose,
+}: {
+  value: number;
+  onClose: () => void;
+}) {
+  const insets = useSafeAreaInsets();
+  const { triggerShare } = useShareCard();
+  const [vmShareOpen, setVmShareOpen] = useState(false);
+  const { fmtCompact } = useFormatMoney();
+  const fmtValue = fmtCompact(value);
+  // Always use raw USD in share text (user is actively choosing to share)
+  const fmtValueShare = `$${value >= 1000 ? `${(value / 1000).toFixed(value % 1000 === 0 ? 0 : 1)}k` : value.toLocaleString()}`;
+  const emoji =
+    value >= 25000 ? '💎' :
+    value >= 10000 ? '🏆' :
+    value >= 5000  ? '🎸' :
+    '✦';
+  const label =
+    value >= 25000 ? "Serious tone investment." :
+    value >= 10000 ? "Your vault is seriously valuable." :
+    value >= 5000  ? "That's a real collection." :
+    "Your gear is worth more than most realize.";
+
+  return (
+    <Modal visible animationType="fade" transparent onRequestClose={onClose}>
+      <View style={vmStyles.overlay}>
+        <View style={[vmStyles.sheet, { paddingBottom: insets.bottom + 24 }]}>
+          <Text style={vmStyles.emoji}>{emoji}</Text>
+          <Text style={vmStyles.valueLabel}>{fmtValue} VAULT VALUE</Text>
+          <Text style={vmStyles.tagline}>{label}</Text>
+          <TouchableOpacity
+            onPress={() => { Haptics.selectionAsync(); setVmShareOpen(true); }}
+            style={msStyles.shareImgBtn}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="share-social-outline" size={15} color={colors.teal} />
+            <Text style={msStyles.shareImgText}>Share</Text>
+          </TouchableOpacity>
+          <SocialShareSheet
+            visible={vmShareOpen}
+            onClose={() => setVmShareOpen(false)}
+            text={[
+              `${fmtValueShare} vault value 🎛`,
+              '',
+              value >= 25000 ? 'Serious tone investment.' :
+              value >= 10000 ? 'My vault is seriously valuable.' :
+              value >= 5000  ? "That's a real collection." :
+              'My gear is worth more than most realize.',
+              '',
+              `Track yours on TPC → https://thepedalcollaborative.com`,
+              '',
+              '#guitarpedals #pedalboard #tonehunter',
+            ].join('\n')}
+            xText={`${fmtValueShare} in pedals and counting 🎛 #guitarpedals #pedalboard`}
+            onImageShare={() => triggerShare({ type: 'milestone', count: 0, marketValue: value })}
+          />
+          <TouchableOpacity
+            onPress={() => { Haptics.selectionAsync(); onClose(); }}
+            activeOpacity={0.75}
+            style={vmStyles.closeBtn}
+          >
+            <Text style={vmStyles.closeBtnText}>Nice 🤙</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const vmStyles = StyleSheet.create({
+  overlay: {
+    flex: 1,
+    backgroundColor: 'rgba(10,20,25,0.78)',
+    justifyContent: 'flex-end',
+  },
+  sheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    paddingTop: spacing.xxl,
+    paddingHorizontal: spacing.xl,
+    alignItems: 'center',
+    gap: spacing.md,
+    borderTopWidth: 1,
+    borderColor: colors.border,
+  },
+  emoji: {
+    fontSize: 52,
+    marginBottom: spacing.sm,
+  },
+  valueLabel: {
+    fontFamily: typography.display,
+    fontSize: typography.sizes.xxl,
+    color: colors.teal,
+    letterSpacing: 1,
+    textAlign: 'center',
+  },
+  tagline: {
+    fontFamily: typography.body,
+    fontSize: typography.sizes.base,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  closeBtn: {
+    marginTop: spacing.sm,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.xl,
+    borderRadius: radius.full,
+    backgroundColor: colors.teal + '18',
+  },
+  closeBtnText: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: typography.sizes.base,
+    color: colors.teal,
+  },
+});
 
 // ─── Profile completion bar ───────────────────────────────────────────────────
 function ProfileCompletionBar({ pct, onPress }: { pct: number; onPress: () => void }) {
@@ -193,7 +333,7 @@ function AIHeroCard({
               <Text style={heroStyles.pickAge}>
                 {daysAgo === 0 ? 'Today' : daysAgo === 1 ? 'Yesterday' : `${daysAgo} days ago`}
               </Text>
-              <Text style={heroStyles.runAgain}>Run again →</Text>
+              <Text style={heroStyles.runAgain}>Feed your GAS →</Text>
             </View>
           </>
         ) : (
@@ -206,7 +346,7 @@ function AIHeroCard({
                 : '4 questions. Your personalized recommendation.'}
             </Text>
             <View style={heroStyles.bottomRow}>
-              <Text style={heroStyles.runAgain}>Get My Pick →</Text>
+              <Text style={heroStyles.runAgain}>Feed your GAS →</Text>
             </View>
           </>
         )}
@@ -217,20 +357,48 @@ function AIHeroCard({
 
 // ─── Value stat ───────────────────────────────────────────────────────────────
 function ValueStat({ invested, market }: { invested: number; market: number }) {
+  const { fmt, fmtDelta } = useFormatMoney();
   if (market <= 0) return null;
   const delta = market - invested;
   const positive = delta >= 0;
-  const label = positive ? `+$${Math.round(delta).toLocaleString()}` : `-$${Math.abs(Math.round(delta)).toLocaleString()}`;
   return (
     <View style={vsStyles.root}>
-      <Text style={vsStyles.num}>${Math.round(market).toLocaleString()}</Text>
+      <Text style={vsStyles.num}>{fmt(Math.round(market))}</Text>
       {invested > 0 && delta !== 0 && (
         <Text style={[vsStyles.delta, { color: positive ? colors.success : colors.error }]}>
-          {label}
+          {fmtDelta(delta)}
         </Text>
       )}
       <Text style={vsStyles.label}>Est. Value</Text>
     </View>
+  );
+}
+
+// ─── This Week on TPC card ────────────────────────────────────────────────────
+function ThisWeekCard({ video, onPress }: { video: LatestVideo; onPress: () => void }) {
+  return (
+    <TouchableOpacity style={twStyles.card} activeOpacity={0.82} onPress={onPress}>
+      <View style={twStyles.thumbWrapper}>
+        {video.thumbnail ? (
+          <Image source={{ uri: video.thumbnail }} style={twStyles.thumb} resizeMode="cover" />
+        ) : (
+          <View style={[twStyles.thumb, twStyles.thumbPlaceholder]}>
+            <Ionicons name="play-circle-outline" size={32} color={colors.textMuted} />
+          </View>
+        )}
+        <View style={twStyles.playOverlay}>
+          <Ionicons name="play" size={16} color="#fff" />
+        </View>
+      </View>
+      <View style={twStyles.body}>
+        <View style={twStyles.labelRow}>
+          <Ionicons name="logo-youtube" size={12} color="#FF0000" />
+          <Text style={twStyles.label}>THIS WEEK ON TPC</Text>
+        </View>
+        <Text style={twStyles.title} numberOfLines={2}>{video.title}</Text>
+      </View>
+      <Ionicons name="chevron-forward" size={16} color={colors.textMuted} style={twStyles.chevron} />
+    </TouchableOpacity>
   );
 }
 
@@ -246,15 +414,20 @@ export default function HomeScreen() {
     session,
     profile, ownedPedals, wishlistPedals, boards,
     userImageUrls, userImageThumbUrls, viewMode,
-    totalInvested, totalMarketValue,
+    totalInvested, totalMarketValue, marketValues,
     lastCustomShopPick,
     fetchWeeklyPick, weeklyPick,
     addToWishlist,
     milestoneToShow, clearMilestone,
+    valueMilestoneToShow, clearValueMilestone,
+    wifeMode,
   } = useStore();
+  const { fmt, fmtDelta } = useFormatMoney();
 
   const [showWeeklyDetail, setShowWeeklyDetail] = useState(false);
   const [weeklyWishlistState, setWeeklyWishlistState] = useState<'idle' | 'loading' | 'added' | 'exists'>('idle');
+  const [showVaultSnapshot, setShowVaultSnapshot] = useState(false);
+  const [latestVideo, setLatestVideo] = useState<LatestVideo | null>(null);
   const isPro     = Boolean(profile?.is_premium) || hasBetaFullAccess();
   const hasProfile = Boolean(profile?.pedal_expert_profile?.onboarding_completed_at);
   const profilePct = calcProfilePct(profile);
@@ -289,6 +462,22 @@ export default function HomeScreen() {
     return map;
   }, [boards]);
 
+  // Vault value breakdown by category
+  const categoryBreakdown = useMemo(() => {
+    if (ownedPedals.length === 0) return [];
+    const map: Record<string, { count: number; invested: number; market: number }> = {};
+    for (const p of ownedPedals) {
+      const cat = p.category_override ?? p.pedal?.category ?? 'other';
+      if (!map[cat]) map[cat] = { count: 0, invested: 0, market: 0 };
+      map[cat].count++;
+      if (p.purchase_price) map[cat].invested += p.purchase_price;
+      if (marketValues[p.pedal_id]) map[cat].market += marketValues[p.pedal_id];
+    }
+    return Object.entries(map)
+      .map(([cat, data]) => ({ cat, ...data }))
+      .sort((a, b) => (b.market || b.invested) - (a.market || a.invested));
+  }, [ownedPedals, marketValues]);
+
   // Board category dots for home card
   const boardSlotColors = useMemo(() => {
     if (!latestBoard) return [];
@@ -320,9 +509,21 @@ export default function HomeScreen() {
     };
   }, [latestBoard?.id, latestBoard?.board_image_path]);
 
+  useEffect(() => {
+    let mounted = true;
+    invokeEdgeFunction('youtube-videos', {}).then(({ data }) => {
+      if (!mounted) return;
+      const v = (data as { videos?: LatestVideo[] })?.videos?.[0];
+      if (v) setLatestVideo(v);
+    }).catch(() => {});
+    return () => { mounted = false; };
+  }, []);
+
   const navigateToFinder = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    navigation.navigate('Finder' as never);
+    // Switch to the TPC.ai tab so the Custom Shop experience is consistent
+    // with the bottom bar entry point (both land on AIHub)
+    navigation.getParent()?.navigate('TPC.ai' as never);
   };
 
   const navigateToProfile = () => {
@@ -385,7 +586,7 @@ export default function HomeScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Stats row — Owned / Wishlist / Est. Value */}
+          {/* Stats row — Owned / Wishlist / Boards */}
           <View style={styles.statsRow}>
             <TouchableOpacity
               activeOpacity={0.75}
@@ -399,30 +600,62 @@ export default function HomeScreen() {
               style={styles.statTile}
               onPress={() => navigation.navigate('Vault', { initialTab: 'wishlist' })}
             >
-              <StatCard label="Wishlist" value={wishlistPedals.length} accent={colors.rose} />
+              <StatCard label="GAS List" value={wishlistPedals.length} accent={colors.rose} />
             </TouchableOpacity>
-            {/* Value stat — shows market value delta when data is available */}
-            {totalMarketValue > 0 ? (
-              <TouchableOpacity
-                activeOpacity={0.75}
-                style={styles.statTile}
-                onPress={() => navigation.navigate('Vault', { initialTab: 'owned' })}
-              >
-                <ValueStat invested={totalInvested} market={totalMarketValue} />
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity
-                activeOpacity={0.75}
-                style={styles.statTile}
-                onPress={() => navigation.navigate('Boards' as never)}
-              >
-                <StatCard label="Boards" value={boards.length} accent={colors.slate} />
-              </TouchableOpacity>
-            )}
+            <TouchableOpacity
+              activeOpacity={0.75}
+              style={styles.statTile}
+              onPress={() => navigation.navigate('Boards' as never)}
+            >
+              <StatCard label="Boards" value={boards.length} accent={colors.slate} />
+            </TouchableOpacity>
           </View>
         </LinearGradient>
 
         <View style={styles.body}>
+
+          {/* ── Vault Snapshot ── */}
+          {ownedPedals.length > 0 && !wifeMode && (
+            <TouchableOpacity
+              style={styles.vaultSnapshot}
+              activeOpacity={0.85}
+              onPress={() => setShowVaultSnapshot(true)}
+            >
+              <View style={styles.vaultSnapshotHeader}>
+                <Ionicons name="trending-up-outline" size={13} color={colors.teal} />
+                <Text style={styles.vaultSnapshotTitle}>Vault Value</Text>
+                <Ionicons name="chevron-forward" size={13} color={colors.textMuted} />
+              </View>
+              {totalMarketValue > 0 ? (
+                <View style={styles.vaultSnapshotRow}>
+                  <View style={styles.vaultSnapshotStat}>
+                    <Text style={styles.vaultSnapshotStatValue}>{fmt(totalInvested)}</Text>
+                    <Text style={styles.vaultSnapshotStatLabel}>Invested</Text>
+                  </View>
+                  <Ionicons name="arrow-forward" size={13} color={colors.textMuted} />
+                  <View style={styles.vaultSnapshotStat}>
+                    <Text style={[styles.vaultSnapshotStatValue, { color: colors.teal }]}>{fmt(totalMarketValue)}</Text>
+                    <Text style={styles.vaultSnapshotStatLabel}>Market</Text>
+                  </View>
+                  {totalInvested > 0 && (
+                    <View style={[styles.vaultSnapshotBadge, {
+                      backgroundColor: totalMarketValue >= totalInvested ? colors.teal + '20' : colors.rose + '20',
+                    }]}>
+                      <Text style={[styles.vaultSnapshotBadgeText, {
+                        color: totalMarketValue >= totalInvested ? colors.teal : colors.rose,
+                      }]}>
+                        {fmtDelta(totalMarketValue - totalInvested)}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              ) : (
+                <Text style={styles.vaultSnapshotEmpty}>
+                  {ownedPedals.length} pedal{ownedPedals.length !== 1 ? 's' : ''} · Tap to see breakdown
+                </Text>
+              )}
+            </TouchableOpacity>
+          )}
 
           {/* ── Profile completion nudge ── */}
           <ProfileCompletionBar
@@ -453,6 +686,17 @@ export default function HomeScreen() {
               <Text style={styles.weeklyCardWhy} numberOfLines={2}>{weeklyPick.why}</Text>
               <Text style={styles.weeklyCardCountdown}>{weeklyPickCountdownLabel()}</Text>
             </TouchableOpacity>
+          )}
+
+          {/* ── This Week on TPC ── */}
+          {latestVideo && (
+            <ThisWeekCard
+              video={latestVideo}
+              onPress={() => {
+                Haptics.selectionAsync();
+                navigation.navigate('Videos' as never);
+              }}
+            />
           )}
 
           {/* ── Recent Pedals ── */}
@@ -571,8 +815,7 @@ export default function HomeScreen() {
         >
           <View style={styles.weeklyModalOverlay}>
             <TouchableOpacity style={styles.weeklyModalBackdrop} activeOpacity={1} onPress={() => setShowWeeklyDetail(false)} />
-            <View style={styles.weeklyModalSheet}>
-              <View style={styles.weeklyModalHandle} />
+            <SwipeDismissSheet style={styles.weeklyModalSheet} onDismiss={() => setShowWeeklyDetail(false)}>
               {/* Header */}
               <View style={styles.weeklyModalHeader}>
                 <View style={styles.weeklyModalTitleRow}>
@@ -611,8 +854,24 @@ export default function HomeScreen() {
                   disabled={weeklyWishlistState !== 'idle'}
                   onPress={async () => {
                     setWeeklyWishlistState('loading');
-                    const result = await addToWishlist(weeklyPick.brand, weeklyPick.model);
-                    setWeeklyWishlistState(result === 'exists' ? 'exists' : 'added');
+                    const result = await addToWishlist(weeklyPick.brand, weeklyPick.model, {
+                      category: weeklyPick.category ?? 'other',
+                      subcategory: 'Weekly Pick',
+                      description: weeklyPick.why ?? '',
+                      analog: false,
+                      price: null,
+                    });
+                    if (result === 'added') {
+                      setWeeklyWishlistState('added');
+                    } else if (result === 'exists') {
+                      setWeeklyWishlistState('exists');
+                    } else if (result === 'not_found') {
+                      setWeeklyWishlistState('idle');
+                      Alert.alert('Not in catalog yet', 'Could not add this pick right now. Please try again in a moment.');
+                    } else {
+                      setWeeklyWishlistState('idle');
+                      Alert.alert('Could not add', 'Please try again in a moment.');
+                    }
                   }}
                 >
                   {weeklyWishlistState === 'loading' ? (
@@ -635,10 +894,87 @@ export default function HomeScreen() {
                   )}
                 </TouchableOpacity>
               </View>
-            </View>
+            </SwipeDismissSheet>
           </View>
         </Modal>
       )}
+
+      {/* ── Vault Snapshot modal ── */}
+      <Modal
+        visible={showVaultSnapshot}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowVaultSnapshot(false)}
+      >
+        <View style={styles.weeklyModalOverlay}>
+          <TouchableOpacity style={styles.weeklyModalBackdrop} activeOpacity={1} onPress={() => setShowVaultSnapshot(false)} />
+          <SwipeDismissSheet style={[styles.weeklyModalSheet, { maxHeight: '80%' }]} onDismiss={() => setShowVaultSnapshot(false)}>
+            <View style={styles.weeklyModalHeader}>
+              <View style={styles.weeklyModalTitleRow}>
+                <Ionicons name="trending-up-outline" size={15} color={colors.teal} />
+                <Text style={styles.weeklyModalTitle}>Vault Snapshot</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowVaultSnapshot(false)} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
+                <Ionicons name="close" size={20} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Totals */}
+            {totalMarketValue > 0 && totalInvested > 0 && (
+              <View style={styles.snapshotTotals}>
+                <View style={styles.snapshotTotalItem}>
+                  <Text style={styles.snapshotTotalValue}>{fmt(totalInvested)}</Text>
+                  <Text style={styles.snapshotTotalLabel}>Invested</Text>
+                </View>
+                <View style={styles.snapshotTotalItem}>
+                  <Text style={[styles.snapshotTotalValue, { color: colors.teal }]}>{fmt(totalMarketValue)}</Text>
+                  <Text style={styles.snapshotTotalLabel}>Market Value</Text>
+                </View>
+                <View style={styles.snapshotTotalItem}>
+                  <Text style={[styles.snapshotTotalValue, {
+                    color: totalMarketValue >= totalInvested ? colors.teal : colors.rose,
+                  }]}>
+                    {fmtDelta(totalMarketValue - totalInvested)}
+                  </Text>
+                  <Text style={styles.snapshotTotalLabel}>Net</Text>
+                </View>
+              </View>
+            )}
+
+            <ScrollView contentContainerStyle={styles.snapshotList}>
+              <Text style={styles.weeklyModalWhyLabel}>By Category</Text>
+              {categoryBreakdown.map(({ cat, count, invested, market }) => {
+                const dotColor = categoryColors[cat] ?? colors.textMuted;
+                const net = market > 0 && invested > 0 ? market - invested : null;
+                const label = cat.charAt(0).toUpperCase() + cat.slice(1).replace(/_/g, ' ');
+                return (
+                  <View key={cat} style={styles.snapshotCatRow}>
+                    <View style={[styles.snapshotCatDot, { backgroundColor: dotColor }]} />
+                    <View style={styles.snapshotCatInfo}>
+                      <Text style={styles.snapshotCatName}>
+                        {label}{' '}
+                        <Text style={styles.snapshotCatCount}>({count})</Text>
+                      </Text>
+                      <Text style={styles.snapshotCatSub}>
+                        {market > 0
+                          ? `${fmt(market)} market`
+                          : invested > 0
+                          ? `${fmt(invested)} invested`
+                          : `${count} pedal${count !== 1 ? 's' : ''}`}
+                      </Text>
+                    </View>
+                    {net !== null && (
+                      <Text style={[styles.snapshotCatNet, { color: net >= 0 ? colors.teal : colors.rose }]}>
+                        {fmtDelta(net)}
+                      </Text>
+                    )}
+                  </View>
+                );
+              })}
+            </ScrollView>
+          </SwipeDismissSheet>
+        </View>
+      </Modal>
 
       {/* ── Milestone celebration ── */}
       {milestoneToShow !== null && (
@@ -647,6 +983,14 @@ export default function HomeScreen() {
           totalMarketValue={totalMarketValue}
           onClose={() => { clearMilestone(); }}
           onGetPick={() => { clearMilestone(); navigateToFinder(); }}
+        />
+      )}
+
+      {/* ── Value milestone celebration ── */}
+      {valueMilestoneToShow !== null && milestoneToShow === null && (
+        <ValueMilestoneModal
+          value={valueMilestoneToShow}
+          onClose={clearValueMilestone}
         />
       )}
     </>
@@ -1206,5 +1550,196 @@ const styles = StyleSheet.create({
     fontSize: typography.sizes.base,
     fontFamily: typography.bodySemiBold,
     color: colors.teal,
+  },
+
+  // ── Vault Snapshot card ───────────────────────────────────────────────────
+  vaultSnapshot: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    gap: spacing.xs,
+  },
+  vaultSnapshotHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  vaultSnapshotTitle: {
+    flex: 1,
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.bodySemiBold,
+    color: colors.teal,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  vaultSnapshotRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  vaultSnapshotStat: {
+    alignItems: 'flex-start',
+  },
+  vaultSnapshotStatValue: {
+    fontSize: typography.sizes.md,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textPrimary,
+  },
+  vaultSnapshotStatLabel: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+  },
+  vaultSnapshotBadge: {
+    marginLeft: 'auto' as any,
+    borderRadius: radius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+  },
+  vaultSnapshotBadgeText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+  },
+  vaultSnapshotEmpty: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+  },
+
+  // ── Vault Snapshot modal ──────────────────────────────────────────────────
+  snapshotTotals: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    paddingHorizontal: spacing.base,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    marginBottom: spacing.sm,
+  },
+  snapshotTotalItem: {
+    alignItems: 'center',
+    gap: 2,
+  },
+  snapshotTotalValue: {
+    fontSize: typography.sizes.lg,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textPrimary,
+  },
+  snapshotTotalLabel: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+  },
+  snapshotList: {
+    paddingHorizontal: spacing.base,
+    paddingBottom: spacing.xl,
+    gap: spacing.xs,
+  },
+  snapshotCatRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border + '60',
+  },
+  snapshotCatDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    flexShrink: 0,
+  },
+  snapshotCatInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  snapshotCatName: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textPrimary,
+  },
+  snapshotCatCount: {
+    fontFamily: typography.body,
+    color: colors.textMuted,
+  },
+  snapshotCatSub: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+  },
+  snapshotCatNet: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+  },
+});
+
+const THUMB_W = 80;
+const THUMB_H = 54;
+
+const twStyles = StyleSheet.create({
+  card: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: 'hidden',
+    gap: spacing.sm,
+    paddingRight: spacing.sm,
+  },
+  thumbWrapper: {
+    position: 'relative',
+    width: THUMB_W,
+    height: THUMB_H,
+    flexShrink: 0,
+  },
+  thumb: {
+    width: THUMB_W,
+    height: THUMB_H,
+    backgroundColor: colors.surfaceHigh,
+  },
+  thumbPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playOverlay: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  body: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    gap: 3,
+  },
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  label: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: 10,
+    color: colors.textMuted,
+    letterSpacing: 0.5,
+  },
+  title: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: typography.sizes.sm,
+    color: colors.textPrimary,
+    lineHeight: 18,
+  },
+  chevron: {
+    flexShrink: 0,
   },
 });

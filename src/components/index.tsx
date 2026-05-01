@@ -1,4 +1,5 @@
 export { ExpertMode } from './ExpertMode';
+export { NetworkErrorView } from './NetworkErrorView';
 export { FsftShareCard } from './FsftShareCard';
 export { CollectionShareCard } from './CollectionShareCard';
 export type { CollectionPedal, PriceMode } from './CollectionShareCard';
@@ -23,6 +24,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, spacing, radius, categoryColors } from '../theme';
 import { UserPedal } from '../lib/supabase';
+import { useFormatMoney } from '../hooks/useFormatMoney';
+import { useStore } from '../hooks/useStore';
 
 // ─── TPCCard ──────────────────────────────────────────────────────────────────
 // Generic card container with surface background and border
@@ -100,6 +103,8 @@ type PedalCardProps = {
 };
 
 function PedalCardInner({ userPedal, retired = false, marketValue, imageUrlOverride, viewMode = 'tile', boardColors, onPress, onLongPress }: PedalCardProps) {
+  const { fmt, fmtDelta } = useFormatMoney();
+  const wifeMode = useStore(s => s.wifeMode);
   const pedal = userPedal.pedal;
   if (!pedal) return null;
   const imageUrl = imageUrlOverride ?? userPedal.colorway?.image_url ?? pedal.image_url;
@@ -212,30 +217,34 @@ function PedalCardInner({ userPedal, retired = false, marketValue, imageUrlOverr
                 </View>
                 {retiredPnl != null && (
                   <Text style={[styles.marketDelta, retiredPnl >= 0 ? styles.marketGain : styles.marketLoss]}>
-                    {retiredPnl >= 0 ? '+' : ''}${retiredPnl.toLocaleString()}
+                    {fmtDelta(retiredPnl)}
                   </Text>
                 )}
                 {userPedal.retired_price != null && (
                   <Text style={styles.pedalPriceSub}>
-                    Sold ${userPedal.retired_price.toLocaleString()}
+                    Sold {fmt(userPedal.retired_price)}
                   </Text>
                 )}
               </>
             ) : (
               <>
-                {marketValue != null ? (
+                {!wifeMode && (
                   <>
-                    <Text style={styles.pedalPrice}>~${Math.round(marketValue).toLocaleString()}</Text>
-                    {paidOrTarget != null && (
-                      <Text style={styles.pedalPriceSub}>
-                        {isWishlist ? 'Target' : 'Paid'} ${paidOrTarget.toLocaleString()}
-                      </Text>
+                    {marketValue != null ? (
+                      <>
+                        <Text style={styles.pedalPrice}>{fmt(marketValue)}</Text>
+                        {paidOrTarget != null && (
+                          <Text style={styles.pedalPriceSub}>
+                            {isWishlist ? 'Target' : 'Paid'} {fmt(paidOrTarget)}
+                          </Text>
+                        )}
+                      </>
+                    ) : (
+                      displayPrice != null && (
+                        <Text style={styles.pedalPrice}>{fmt(displayPrice)}</Text>
+                      )
                     )}
                   </>
-                ) : (
-                  displayPrice != null && (
-                    <Text style={styles.pedalPrice}>${displayPrice.toLocaleString()}</Text>
-                  )
                 )}
                 {isOwned && userPedal.condition && (
                   <Text style={styles.pedalCondition}>{userPedal.condition}</Text>
@@ -247,6 +256,11 @@ function PedalCardInner({ userPedal, retired = false, marketValue, imageUrlOverr
 
         <View style={styles.pedalCardBottom}>
           <CategoryBadge category={displayCategory} small />
+          {isOwned && !retired && userPedal.loaned_to && (
+            <View style={styles.loanedBadge}>
+              <Text style={styles.loanedBadgeText}>LOANED</Text>
+            </View>
+          )}
           {pedal.analog && !retired && (
             <View style={styles.analogBadge}>
               <Text style={styles.analogBadgeText}>ANALOG</Text>
@@ -257,9 +271,9 @@ function PedalCardInner({ userPedal, retired = false, marketValue, imageUrlOverr
               Retired {new Date(userPedal.retired_date).getFullYear()}
             </Text>
           )}
-          {delta != null && (
+          {delta != null && !wifeMode && (
             <Text style={[styles.marketDelta, delta >= 0 ? styles.marketGain : styles.marketLoss]}>
-              {delta >= 0 ? '+' : ''}${delta.toLocaleString()}
+              {fmtDelta(delta)}
             </Text>
           )}
           {/* Wishlist price-drop badge */}
@@ -707,6 +721,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
+  },
+  loanedBadge: {
+    backgroundColor: '#7C3AED22',
+    borderWidth: 1,
+    borderColor: '#7C3AED55',
+    borderRadius: radius.full,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  loanedBadgeText: {
+    fontSize: 9,
+    fontFamily: typography.bodySemiBold,
+    color: '#7C3AED',
+    letterSpacing: 0.4,
   },
   analogBadge: {
     backgroundColor: colors.warning + '22',
