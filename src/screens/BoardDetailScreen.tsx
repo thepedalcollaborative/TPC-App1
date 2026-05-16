@@ -1,10 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  ScrollView,
   TouchableOpacity,
+  ScrollView,
   Modal,
   FlatList,
   ActivityIndicator,
@@ -13,6 +13,9 @@ import {
   KeyboardAvoidingView,
   Platform,
   Image,
+  Keyboard,
+  PanResponder,
+  Animated,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
@@ -22,12 +25,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, spacing, radius, gradients, categoryColors, boardColorOptions } from '../theme';
-import { shareBoard } from '../lib/share';
 import { HiddenShareCard } from '../components/ShareCard';
 import { useShareCard } from '../lib/useShareCard';
 import { useStore } from '../hooks/useStore';
 import { supabase, BoardSlot, UserPedal } from '../lib/supabase';
-import { CategoryBadge } from '../components';
+import { CategoryBadge, SocialShareSheet } from '../components';
+import { SwipeDismissSheet } from '../components/SwipeDismissSheet';
 import { BoardsStackParamList } from '../types/navigation';
 
 type RouteProps = RouteProp<BoardsStackParamList, 'BoardDetail'>;
@@ -39,6 +42,7 @@ export default function BoardDetailScreen() {
   const { boardId } = route.params;
 
   const { cardRef: boardCardRef, cardData: boardCardData, triggerShare: triggerBoardShare } = useShareCard();
+  const [shareSheetOpen, setShareSheetOpen] = useState(false);
   const { session, boards, ownedPedals, fetchBoards } = useStore();
   const board = boards.find(b => b.id === boardId);
   const slots = board?.slots ?? [];
@@ -52,11 +56,43 @@ export default function BoardDetailScreen() {
     return Array.from(set);
   }, [boards]);
 
+  const sortedSlots = useMemo(
+    () => slots.slice().sort((a, b) => a.position - b.position),
+    [slots],
+  );
+
   const [showAddPedal, setShowAddPedal] = useState(false);
   const [updatingColor, setUpdatingColor] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
   const [savingName, setSavingName] = useState(false);
+
+  // Track keyboard visibility so modal-close handlers can wait for keyboardDidHide
+  const kbVisibleRef = useRef(false);
+  useEffect(() => {
+    const s = Keyboard.addListener('keyboardWillShow', () => { kbVisibleRef.current = true; });
+    const h = Keyboard.addListener('keyboardDidHide',  () => { kbVisibleRef.current = false; });
+    return () => { s.remove(); h.remove(); };
+  }, []);
+
+  const closeEditingName = () => {
+    const doClose = () => setEditingName(false);
+    if (kbVisibleRef.current) {
+      Keyboard.dismiss();
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        hideSub.remove();
+        clearTimeout(fallback);
+        doClose();
+      };
+      const hideSub = Keyboard.addListener('keyboardDidHide', settle);
+      const fallback = setTimeout(settle, 500);
+    } else {
+      doClose();
+    }
+  };
   const [boardImageUrl, setBoardImageUrl] = useState<string | null>(null);
   const [uploadingBoardPhoto, setUploadingBoardPhoto] = useState(false);
 
@@ -106,7 +142,7 @@ export default function BoardDetailScreen() {
     setEditingName(false);
   };
 
-  const handleRemoveSlot = (slot: BoardSlot) => {
+  const handleRemoveSlot = useCallback((slot: BoardSlot) => {
     Alert.alert(
       'Remove Pedal',
       `Remove ${slot.pedal?.brand} ${slot.pedal?.model} from this board?`,
@@ -123,7 +159,7 @@ export default function BoardDetailScreen() {
         },
       ]
     );
-  };
+  }, [fetchBoards]);
 
   const handleBoardPhoto = async (useCamera: boolean) => {
     if (!board || !session?.user || uploadingBoardPhoto) return;
@@ -155,7 +191,7 @@ export default function BoardDetailScreen() {
     setUploadingBoardPhoto(true);
     try {
       const asset = result.assets[0];
-      const basePath = `user_pedals/${session.user.id}/boards/${board.id}/${Date.now()}`;
+      const basePath = `${session.user.id}/boards/${board.id}/${Date.now()}`;
       const path = `${basePath}.jpg`;
 
       const fullAsset = await ImageManipulator.manipulateAsync(
@@ -163,12 +199,11 @@ export default function BoardDetailScreen() {
         [{ resize: { width: 1400 } }],
         { compress: 0.82, format: ImageManipulator.SaveFormat.JPEG }
       );
-      const fullResp = await fetch(fullAsset.uri);
-      const blob = await fullResp.blob();
+      const fullBuffer = await fetch(fullAsset.uri).then((r) => r.arrayBuffer());
 
       const { error: uploadError } = await supabase.storage
         .from('user-pedal-photos')
-        .upload(path, blob, {
+        .upload(path, fullBuffer, {
           upsert: false,
           contentType: 'image/jpeg',
           cacheControl: '31536000',
@@ -193,6 +228,121 @@ export default function BoardDetailScreen() {
       setUploadingBoardPhoto(false);
     }
   };
+
+  // Optimistic local order — set immediately on drag, cleared after server confirms.
+  const [localSlots, setLocalSlots] = useState<typeof sortedSlots | null>(null);
+  const displaySlots = localSlots ?? sortedSlots;
+
+  // ── Drag-to-reorder state ─────────────────────────────────────────────────
+  const dragActive = useRef(false);
+  const dragFromIdx = useRef(-1);
+  const dragToIdx = useRef(-1);
+  const dragYAnim = useRef(new Animated.Value(0)).current;
+  const itemHeightRef = useRef(0); // measured from first rendered slot row
+  const [draggingIdx, setDraggingIdx] = useState<number | null>(null);
+  const [dropIdx, setDropIdx] = useState<number | null>(null);
+  // Stable ref so panResponder callbacks always read current displaySlots
+  const displaySlotsRef = useRef(displaySlots);
+  useEffect(() => { displaySlotsRef.current = displaySlots; }, [displaySlots]);
+
+  const handleSlotLongPress = useCallback((index: number) => {
+    dragActive.current = true;
+    dragFromIdx.current = index;
+    dragToIdx.current = index;
+    dragYAnim.setValue(0);
+    setDraggingIdx(index);
+    setDropIdx(index);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+  }, [dragYAnim]);
+
+  // Stable PanResponder — created once so it never gets torn down mid-drag.
+  // onMoveShouldSetPanResponder only returns true after a long press has fired,
+  // so normal taps and the ScrollView's scroll gesture are unaffected.
+  const slotPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onStartShouldSetPanResponderCapture: () => false,
+      onMoveShouldSetPanResponder: () => dragActive.current,
+      onMoveShouldSetPanResponderCapture: () => dragActive.current,
+      onPanResponderMove: (_evt, gs) => {
+        dragYAnim.setValue(gs.dy);
+        if (!dragActive.current || itemHeightRef.current === 0) return;
+        const from = dragFromIdx.current;
+        const count = displaySlotsRef.current.length;
+        const rawTarget = from + gs.dy / itemHeightRef.current;
+        const target = Math.max(0, Math.min(count - 1, Math.round(rawTarget)));
+        if (target !== dragToIdx.current) {
+          dragToIdx.current = target;
+          setDropIdx(target);
+          Haptics.selectionAsync();
+        }
+      },
+      onPanResponderRelease: () => {
+        if (!dragActive.current) return;
+        const from = dragFromIdx.current;
+        const to = dragToIdx.current;
+        dragActive.current = false;
+        dragYAnim.setValue(0);
+        setDraggingIdx(null);
+        setDropIdx(null);
+        if (from !== to && from >= 0 && to >= 0) {
+          reorderSlotsRef.current(from, to);
+        }
+      },
+      onPanResponderTerminate: () => {
+        dragActive.current = false;
+        dragYAnim.setValue(0);
+        setDraggingIdx(null);
+        setDropIdx(null);
+      },
+    })
+  ).current;
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // reorderSlots uses two-phase position updates to avoid the unique constraint
+  // on (board_id, position): phase 1 uses negative temps, phase 2 sets finals.
+  const reorderSlots = useCallback(
+    async (from: number, to: number) => {
+      if (from === to) return;
+      const current = localSlots ?? sortedSlots;
+      const next = [...current];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+
+      setLocalSlots(next);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
+      // Phase 1: temp negative positions — no overlap with existing positives
+      await Promise.all(
+        next.map((slot, i) =>
+          supabase.from('board_slots').update({ position: -(i + 1) }).eq('id', slot.id)
+        )
+      );
+      // Phase 2: final positive positions
+      const results = await Promise.all(
+        next.map((slot, i) =>
+          supabase.from('board_slots').update({ position: i + 1 }).eq('id', slot.id).select('id')
+        )
+      );
+
+      const updatedCount = results.filter(r => (r.data?.length ?? 0) > 0).length;
+      if (__DEV__) console.log('[Board] reorderSlots: updated', updatedCount, '/', next.length, 'rows');
+
+      if (updatedCount === next.length) {
+        await fetchBoards();
+        setLocalSlots(null);
+      } else {
+        setLocalSlots(null);
+        if (updatedCount === 0) {
+          Alert.alert('Could not save order', 'The pedal order could not be saved. Please try again.');
+        }
+      }
+    },
+    [localSlots, sortedSlots, fetchBoards],
+  );
+  // Stable ref so the panResponder (created once) can always call the latest reorderSlots
+  const reorderSlotsRef = useRef(reorderSlots);
+  useEffect(() => { reorderSlotsRef.current = reorderSlots; }, [reorderSlots]);
 
   if (!board) {
     return (
@@ -267,29 +417,13 @@ export default function BoardDetailScreen() {
             )}
           </TouchableOpacity>
           {slots.length > 0 && (
-            <View style={styles.shareBtnGroup}>
-              <TouchableOpacity
-                style={styles.shareImgBtn}
-                onPress={() => {
-                  Haptics.selectionAsync();
-                  const pedals = slots.slice().sort((a, b) => a.position - b.position).filter(s => s.pedal).map(s => ({ brand: s.pedal!.brand, model: s.pedal!.model }));
-                  triggerBoardShare({ type: 'board', name: board.name, pedals });
-                }}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="share-social-outline" size={16} color={colors.teal} />
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.shareBtn}
-                onPress={() => {
-                  Haptics.selectionAsync();
-                  shareBoard(board.name, slots.slice().sort((a, b) => a.position - b.position).filter(s => s.pedal).map(s => ({ brand: s.pedal!.brand, model: s.pedal!.model })));
-                }}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="share-outline" size={18} color={colors.textSecondary} />
-              </TouchableOpacity>
-            </View>
+            <TouchableOpacity
+              style={styles.shareImgBtn}
+              onPress={() => { Haptics.selectionAsync(); setShareSheetOpen(true); }}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="share-social-outline" size={16} color={colors.teal} />
+            </TouchableOpacity>
           )}
           <TouchableOpacity
             style={styles.addBtn}
@@ -311,7 +445,7 @@ export default function BoardDetailScreen() {
       {slots.length === 0 ? (
         <View style={styles.emptyWrap}>
           <View style={styles.emptyIcon}>
-            <Text style={styles.emptyEmoji}>🎛</Text>
+            <Ionicons name="layers-outline" size={36} color={colors.teal} />
           </View>
           <Text style={styles.emptyTitle}>No pedals on this board yet</Text>
           <Text style={styles.emptySub}>
@@ -322,48 +456,106 @@ export default function BoardDetailScreen() {
         <ScrollView
           contentContainerStyle={styles.slotsList}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          scrollEnabled={draggingIdx === null}
         >
-          <Text style={styles.slotsLabel}>SIGNAL CHAIN</Text>
-          {slots
-            .slice()
-            .sort((a, b) => a.position - b.position)
-            .map((slot, index) => {
+          <Text style={styles.slotsLabel}>SIGNAL CHAIN · HOLD TO REORDER</Text>
+
+          {/* Drag target — panHandlers wrap all slot rows */}
+          <View {...slotPanResponder.panHandlers} style={styles.slotsContainer}>
+            {displaySlots.map((slot, index) => {
               const pedal = slot.pedal;
               if (!pedal) return null;
               const catColor = categoryColors[pedal.category] ?? colors.textMuted;
-              return (
-                <View key={slot.id} style={styles.slotRow}>
-                  {/* Position number */}
-                  <View style={styles.slotPosition}>
-                    <Text style={styles.slotPositionText}>{index + 1}</Text>
-                  </View>
+              const isDragging = draggingIdx === index;
+              const isDropTarget = !isDragging && dropIdx === index && draggingIdx !== null;
 
-                  {/* Connector line */}
-                  {index < slots.length - 1 && (
-                    <View style={styles.slotConnector} />
+              // Compute vertical shift for items displaced by the drag
+              let shiftY = 0;
+              if (draggingIdx !== null && dropIdx !== null && !isDragging) {
+                const itemH = itemHeightRef.current || 88;
+                if (draggingIdx < dropIdx && index > draggingIdx && index <= dropIdx) {
+                  shiftY = -itemH;   // moving down: items above shift up
+                } else if (draggingIdx > dropIdx && index >= dropIdx && index < draggingIdx) {
+                  shiftY = itemH;    // moving up: items below shift down
+                }
+              }
+
+              return (
+                <View
+                  key={slot.id}
+                  style={styles.slotRowWrap}
+                  onLayout={index === 0 ? ({ nativeEvent: { layout } }) => {
+                    if (itemHeightRef.current === 0) itemHeightRef.current = layout.height;
+                  } : undefined}
+                >
+                  {/* Ghost: floats above the list, follows finger */}
+                  {isDragging && (
+                    <Animated.View
+                      style={[
+                        styles.slotRow,
+                        styles.slotRowGhost,
+                        { position: 'absolute', left: 0, right: 0, transform: [{ translateY: dragYAnim }] },
+                      ]}
+                    >
+                      <View style={styles.slotPosition}>
+                        <Text style={styles.slotPositionText}>{index + 1}</Text>
+                      </View>
+                      <View style={[styles.slotCard, { borderLeftColor: catColor }]}>
+                        <View style={styles.slotCardContent}>
+                          <View style={styles.slotCardInfo}>
+                            <CategoryBadge category={pedal.category} small />
+                            <Text style={styles.slotBrand}>{pedal.brand}</Text>
+                            <Text style={styles.slotModel}>{pedal.model}</Text>
+                            <Text style={styles.slotSubcat}>{pedal.subcategory}</Text>
+                          </View>
+                          <Ionicons name="reorder-three-outline" size={22} color={colors.teal} />
+                        </View>
+                      </View>
+                    </Animated.View>
                   )}
 
-                  {/* Pedal card */}
-                  <View style={[styles.slotCard, { borderLeftColor: catColor }]}>
-                    <View style={styles.slotCardContent}>
-                      <View style={styles.slotCardInfo}>
-                        <CategoryBadge category={pedal.category} small />
-                        <Text style={styles.slotBrand}>{pedal.brand}</Text>
-                        <Text style={styles.slotModel}>{pedal.model}</Text>
-                        <Text style={styles.slotSubcat}>{pedal.subcategory}</Text>
-                      </View>
-                      <TouchableOpacity
-                        onPress={() => handleRemoveSlot(slot)}
-                        style={styles.removeBtn}
-                        hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
-                      >
-                        <Ionicons name="trash-outline" size={16} color={colors.textMuted} />
-                      </TouchableOpacity>
+                  {/* Actual row — invisible while dragging (ghost takes its place) */}
+                  <View
+                    style={[
+                      styles.slotRow,
+                      { opacity: isDragging ? 0 : 1, transform: [{ translateY: shiftY }] },
+                      isDropTarget && styles.slotRowDropTarget,
+                    ]}
+                  >
+                    <View style={styles.slotPosition}>
+                      <Text style={styles.slotPositionText}>{index + 1}</Text>
                     </View>
+                    <TouchableOpacity
+                      activeOpacity={0.9}
+                      onLongPress={() => handleSlotLongPress(index)}
+                      delayLongPress={350}
+                      style={[styles.slotCard, { borderLeftColor: catColor }]}
+                    >
+                      <View style={styles.slotCardContent}>
+                        <View style={styles.slotCardInfo}>
+                          <CategoryBadge category={pedal.category} small />
+                          <Text style={styles.slotBrand}>{pedal.brand}</Text>
+                          <Text style={styles.slotModel}>{pedal.model}</Text>
+                          <Text style={styles.slotSubcat}>{pedal.subcategory}</Text>
+                        </View>
+                        <View style={styles.slotActions}>
+                          <Ionicons name="reorder-three-outline" size={20} color={colors.textMuted} />
+                          <TouchableOpacity
+                            onPress={() => handleRemoveSlot(slot)}
+                            style={styles.removeBtn}
+                            hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+                          >
+                            <Ionicons name="trash-outline" size={16} color={colors.textMuted} />
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    </TouchableOpacity>
                   </View>
                 </View>
               );
             })}
+          </View>
         </ScrollView>
       )}
 
@@ -381,20 +573,19 @@ export default function BoardDetailScreen() {
       />
 
       {/* ── Edit Board Name Modal ── */}
-      <Modal visible={editingName} animationType="slide" transparent onRequestClose={() => setEditingName(false)}>
+      <Modal visible={editingName} animationType="slide" transparent onRequestClose={closeEditingName}>
         <KeyboardAvoidingView
           style={styles.modalOverlay}
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
         >
-          <TouchableOpacity style={styles.modalBackdrop} onPress={() => setEditingName(false)} activeOpacity={1} />
-          <View style={styles.modalSheet}>
-            <View style={styles.modalHandle} />
+          <TouchableOpacity style={styles.modalBackdrop} onPress={closeEditingName} activeOpacity={1} />
+          <SwipeDismissSheet style={styles.modalSheet} onDismiss={closeEditingName}>
+            <TouchableOpacity onPress={closeEditingName} activeOpacity={0.7} style={styles.modalCloseBtn} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
+              <Ionicons name="close" size={24} color={colors.textMuted} />
+            </TouchableOpacity>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Edit Board Name</Text>
-              <TouchableOpacity onPress={() => setEditingName(false)}>
-                <Ionicons name="close" size={24} color={colors.textMuted} />
-              </TouchableOpacity>
             </View>
             <Text style={styles.modalHint}>Update the board name below.</Text>
             <Text style={styles.formLabel}>Board Name *</Text>
@@ -423,10 +614,33 @@ export default function BoardDetailScreen() {
                 )}
               </LinearGradient>
             </TouchableOpacity>
-          </View>
+          </SwipeDismissSheet>
         </KeyboardAvoidingView>
       </Modal>
       <HiddenShareCard cardRef={boardCardRef} cardData={boardCardData} />
+      {board && (() => {
+        const pedals = slots.slice().sort((a, b) => a.position - b.position).filter(s => s.pedal).map(s => ({ brand: s.pedal!.brand, model: s.pedal!.model }));
+        const list = pedals.slice(0, 8).map(p => `• ${p.brand} ${p.model}`);
+        if (pedals.length > 8) list.push(`+${pedals.length - 8} more`);
+        const boardText = [
+          `${board.name} 🎸`,
+          '',
+          ...list,
+          '',
+          `${pedals.length} pedal${pedals.length !== 1 ? 's' : ''}. Built on TPC — https://thepedalcollaborative.com`,
+          '',
+          '#guitarpedals #pedalboard #tonehunter',
+        ].join('\n');
+        return (
+          <SocialShareSheet
+            visible={shareSheetOpen}
+            onClose={() => setShareSheetOpen(false)}
+            text={boardText}
+            xText={`My board "${board.name}" has ${pedals.length} pedal${pedals.length !== 1 ? 's' : ''} 🎸 #guitarpedals #pedalboard`}
+            onImageShare={() => triggerBoardShare({ type: 'board', name: board.name, pedals })}
+          />
+        );
+      })()}
     </View>
   );
 }
@@ -481,13 +695,12 @@ function AddPedalToBoardModal({
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
       <View style={styles.modalOverlay}>
         <TouchableOpacity style={styles.modalBackdrop} onPress={onClose} activeOpacity={1} />
-        <View style={styles.modalSheet}>
-          <View style={styles.modalHandle} />
+        <SwipeDismissSheet style={styles.modalSheet} onDismiss={onClose}>
+          <TouchableOpacity onPress={onClose} activeOpacity={0.7} style={styles.modalCloseBtn} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
+            <Ionicons name="close" size={24} color={colors.textMuted} />
+          </TouchableOpacity>
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Add to Board</Text>
-            <TouchableOpacity onPress={onClose}>
-              <Ionicons name="close" size={24} color={colors.textMuted} />
-            </TouchableOpacity>
           </View>
 
           {available.length === 0 ? (
@@ -533,7 +746,7 @@ function AddPedalToBoardModal({
               }}
             />
           )}
-        </View>
+        </SwipeDismissSheet>
       </View>
     </Modal>
   );
@@ -684,11 +897,36 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginBottom: spacing.base,
   },
+  slotsContainer: {
+    // No extra style — panHandlers wrapper only
+  },
+  slotRowWrap: {
+    // Outer container whose height is measured for drag position calculation.
+    // overflow: visible so the ghost Animated.View can float above siblings.
+    overflow: 'visible',
+  },
   slotRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     marginBottom: spacing.md,
-    position: 'relative',
+  },
+  slotRowGhost: {
+    // Elevated appearance while floating during drag
+    zIndex: 100,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.22,
+    shadowRadius: 10,
+    elevation: 10,
+  },
+  slotRowDropTarget: {
+    // Visual hint on the item that will be displaced by the drop
+    opacity: 0.55,
+  },
+  slotActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
   },
   slotPosition: {
     width: 28,
@@ -708,15 +946,6 @@ const styles = StyleSheet.create({
     fontSize: typography.sizes.xs,
     fontFamily: typography.bodySemiBold,
     color: colors.textMuted,
-  },
-  slotConnector: {
-    position: 'absolute',
-    left: 13,
-    top: 38,
-    width: 2,
-    height: 'auto',
-    bottom: -spacing.md,
-    backgroundColor: colors.border,
   },
   slotCard: {
     flex: 1,
@@ -777,9 +1006,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginBottom: spacing.sm,
   },
-  emptyEmoji: {
-    fontSize: 36,
-  },
   emptyTitle: {
     fontSize: typography.sizes.md,
     fontFamily: typography.display,
@@ -830,11 +1056,16 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
     marginBottom: spacing.md,
   },
+  modalCloseBtn: {
+    position: 'absolute',
+    top: spacing.md,
+    right: spacing.md,
+    zIndex: 10,
+    padding: spacing.xs,
+  },
   modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
     marginBottom: spacing.base,
+    paddingRight: spacing.xl,
   },
   modalTitle: {
     fontSize: typography.sizes.lg,

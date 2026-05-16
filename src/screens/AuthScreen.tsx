@@ -5,21 +5,22 @@ import {
   StyleSheet,
   TextInput,
   TouchableOpacity,
-  KeyboardAvoidingView,
   Platform,
-  ScrollView,
   ActivityIndicator,
   Image,
 } from 'react-native';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import * as WebBrowser from 'expo-web-browser';
 import * as AppleAuthentication from 'expo-apple-authentication';
 import { makeRedirectUri } from 'expo-auth-session';
+import Constants from 'expo-constants';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, spacing, radius, gradients } from '../theme';
 import { supabase } from '../lib/supabase';
+import { useStore } from '../hooks/useStore';
 
 // Required for expo-auth-session to handle the redirect on iOS
 WebBrowser.maybeCompleteAuthSession();
@@ -30,10 +31,23 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_ATTEMPTS = 5;
 const LOCKOUT_MS = 5 * 60 * 1000; // 5 minutes
 
-const REDIRECT_URI = makeRedirectUri({ scheme: 'tpc', path: 'auth-callback' });
+// In Expo SDK 54, appOwnership === 'expo' is the reliable Expo Go signal.
+// executionEnvironment is no longer a stable discriminator across SDK versions.
+const IS_EXPO_GO = Constants.appOwnership === 'expo';
+
+const EXPO_OWNER = (Constants.expoConfig?.owner as string | undefined) ?? 'alanbennettjohnson';
+const EXPO_SLUG = (Constants.expoConfig?.slug as string | undefined) ?? 'tpc-app';
+const EXPO_PROXY_REDIRECT_URI = `https://auth.expo.io/@${EXPO_OWNER}/${EXPO_SLUG}`;
+
+// Production/TestFlight: tpc://auth-callback (must be in Supabase → Auth → URL Configuration → Redirect URLs)
+// Expo Go: auth.expo.io proxy (must also be in the allowlist)
+const REDIRECT_URI = IS_EXPO_GO
+  ? EXPO_PROXY_REDIRECT_URI
+  : makeRedirectUri({ scheme: 'tpc', path: 'auth-callback' });
 
 export default function AuthScreen() {
   const insets = useSafeAreaInsets();
+  const setSession = useStore((s) => s.setSession);
   const [mode, setMode] = useState<Mode>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -67,7 +81,7 @@ export default function AuthScreen() {
     }
     setLoading(true);
     setError('');
-    const { error: err } = await supabase.auth.signInWithPassword({
+    const { data, error: err } = await supabase.auth.signInWithPassword({
       email: email.trim().toLowerCase(),
       password,
     });
@@ -82,6 +96,7 @@ export default function AuthScreen() {
         setError('Invalid email or password. Please try again.');
       }
     } else {
+      if (data.session) setSession(data.session);
       failedAttempts.current = 0;
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
@@ -102,13 +117,30 @@ export default function AuthScreen() {
     }
     setLoading(true);
     setError('');
-    const { error: err } = await supabase.auth.signUp({
+    const { data, error: err } = await supabase.auth.signUp({
       email: email.trim().toLowerCase(),
       password,
+      options: {
+        // Deep-link back into the app after the user taps "Confirm your email".
+        // Must also be listed in Supabase → Auth → URL Configuration → Redirect URLs.
+        emailRedirectTo: 'tpc://auth-callback',
+      },
     });
     setLoading(false);
-    if (err) setError('Unable to create account. Please try again.');
+    if (err) {
+      const msg = err.message.toLowerCase();
+      if (msg.includes('already registered') || msg.includes('already exists')) {
+        setError('That email already has an account. Tap Sign In instead.');
+      } else if (msg.includes('password')) {
+        setError(err.message);
+      } else if (msg.includes('email')) {
+        setError(err.message);
+      } else {
+        setError(`Unable to create account: ${err.message}`);
+      }
+    }
     else {
+      if (data.session) setSession(data.session);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       setSignUpSuccess(true);
     }
@@ -130,51 +162,48 @@ export default function AuthScreen() {
         },
       });
 
-      if (oauthErr || !data.url) {
-        setError('Google sign-in is not set up yet. Check Supabase dashboard.');
+      if (oauthErr || !data?.url) {
+        setError('Google sign-in failed to start. Please try again.');
         return;
       }
 
       const result = await WebBrowser.openAuthSessionAsync(data.url, REDIRECT_URI);
 
-      if (result.type === 'success' && result.url) {
-        // Supabase OAuth can return either:
-        // 1) PKCE code in query string (?code=...), or
-        // 2) access_token/refresh_token in hash fragment (#access_token=...)
-        const url = new URL(result.url);
-        const queryParams = new URLSearchParams(url.search ? url.search.slice(1) : '');
-        const code = queryParams.get('code');
-
-        if (code) {
-          const { error: exchangeErr } = await supabase.auth.exchangeCodeForSession(code);
-          if (exchangeErr) {
-            setError(`Google sign-in failed: ${exchangeErr.message}`);
-            return;
-          }
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          return;
-        }
-
-        const hashParams = new URLSearchParams(url.hash ? url.hash.slice(1) : '');
-        const accessToken = hashParams.get('access_token');
-        const refreshToken = hashParams.get('refresh_token');
-        if (accessToken && refreshToken) {
-          const { error: sessionErr } = await supabase.auth.setSession({
-            access_token: accessToken,
-            refresh_token: refreshToken,
-          });
-          if (sessionErr) {
-            setError(`Google sign-in failed: ${sessionErr.message}`);
-            return;
-          }
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          return;
-        }
-
-        setError('Google sign-in failed: no auth code or token returned.');
+      // User tapped Cancel — not an error
+      if (result.type === 'cancel' || result.type === 'dismiss') {
+        return;
       }
-    } catch {
-      setError('Google sign-in failed. Please try again.');
+
+      if (result.type !== 'success' || !result.url) {
+        setError('Google sign-in was not completed. Please try again.');
+        return;
+      }
+
+      // PKCE flow: extract ?code= and exchange for session.
+      // flowType: 'pkce' is set on the Supabase client so this is always PKCE.
+      const url = new URL(result.url);
+      const code = new URLSearchParams(url.search).get('code');
+
+      if (!code) {
+        // Shouldn't happen with PKCE, but surface a clear error if it does.
+        const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+        const errorDesc = hashParams.get('error_description') ?? url.searchParams.get('error_description') ?? 'no auth code returned';
+        setError(`Google sign-in failed: ${errorDesc}. Please try again.`);
+        return;
+      }
+
+      const { error: exchangeErr } = await supabase.auth.exchangeCodeForSession(code);
+      if (exchangeErr) {
+        setError(`Google sign-in failed: ${exchangeErr.message}`);
+        return;
+      }
+
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (sessionData.session) setSession(sessionData.session);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Unknown error';
+      setError(`Google sign-in failed: ${msg}`);
     } finally {
       setOAuthLoading(null);
     }
@@ -208,6 +237,8 @@ export default function AuthScreen() {
       if (idErr) {
         setError('Apple sign-in failed. Make sure Apple is enabled in Supabase.');
       } else {
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData.session) setSession(sessionData.session);
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       }
     } catch (e: unknown) {
@@ -229,15 +260,14 @@ export default function AuthScreen() {
   };
 
   return (
-    <KeyboardAvoidingView
+    <KeyboardAwareScrollView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      contentContainerStyle={[styles.scroll, { paddingTop: insets.top + 24 }]}
+      showsVerticalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
+      enableOnAndroid
+      extraScrollHeight={24}
     >
-      <ScrollView
-        contentContainerStyle={[styles.scroll, { paddingTop: insets.top + 24 }]}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-      >
         {/* ── Logo ── */}
         <View style={styles.logoSection}>
           <Image
@@ -270,21 +300,25 @@ export default function AuthScreen() {
           )}
 
           {/* Sign in with Google */}
-          <TouchableOpacity
-            style={styles.socialBtn}
-            onPress={handleGoogleSignIn}
-            disabled={oauthLoading !== null}
-            activeOpacity={0.85}
-          >
-            {oauthLoading === 'google' ? (
-              <ActivityIndicator size="small" color={colors.textPrimary} />
-            ) : (
-              <>
-                <GoogleIcon />
-                <Text style={styles.socialBtnText}>Continue with Google</Text>
-              </>
-            )}
-          </TouchableOpacity>
+          {!IS_EXPO_GO ? (
+            <TouchableOpacity
+              style={styles.socialBtn}
+              onPress={handleGoogleSignIn}
+              disabled={oauthLoading !== null}
+              activeOpacity={0.85}
+            >
+              {oauthLoading === 'google' ? (
+                <ActivityIndicator size="small" color={colors.textPrimary} />
+              ) : (
+                <>
+                  <GoogleIcon />
+                  <Text style={styles.socialBtnText}>Continue with Google</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          ) : (
+            <Text style={styles.socialHint}>Google sign-in is disabled in Expo Go. Use email for testing.</Text>
+          )}
         </View>
 
         {/* ── Divider ── */}
@@ -304,11 +338,17 @@ export default function AuthScreen() {
               activeOpacity={0.75}
             >
               {mode === m ? (
-                <LinearGradient colors={gradients.teal} style={styles.modeTabGrad}>
+                <>
+                  <LinearGradient
+                    colors={gradients.teal}
+                    style={StyleSheet.absoluteFillObject}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 0 }}
+                  />
                   <Text style={styles.modeTabTextActive}>
                     {m === 'signin' ? 'Sign In' : 'Create Account'}
                   </Text>
-                </LinearGradient>
+                </>
               ) : (
                 <Text style={styles.modeTabText}>
                   {m === 'signin' ? 'Sign In' : 'Create Account'}
@@ -397,12 +437,19 @@ export default function AuthScreen() {
 
         {/* ── Footer ── */}
         <View style={styles.footer}>
-          <Text style={styles.footerText}>
-            By continuing, you agree to our Terms of Service and Privacy Policy.
+          <Text style={styles.footerText}>By continuing, you agree to our{' '}
+            <Text
+              style={styles.footerLink}
+              onPress={() => WebBrowser.openBrowserAsync('https://skejiotfywhmnvsivfsk.supabase.co/storage/v1/object/public/legal/terms-of-service.html')}
+            >Terms of Service</Text>
+            {' '}and{' '}
+            <Text
+              style={styles.footerLink}
+              onPress={() => WebBrowser.openBrowserAsync('https://skejiotfywhmnvsivfsk.supabase.co/storage/v1/object/public/legal/privacy-policy.html')}
+            >Privacy Policy</Text>.
           </Text>
         </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+    </KeyboardAwareScrollView>
   );
 }
 
@@ -483,6 +530,12 @@ const styles = StyleSheet.create({
     fontFamily: typography.bodyMedium,
     color: colors.textPrimary,
   },
+  socialHint: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+    textAlign: 'center',
+  },
   // Divider
   dividerRow: {
     flexDirection: 'row',
@@ -518,11 +571,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   modeTabActive: {},
-  modeTabGrad: {
-    width: '100%',
-    paddingVertical: spacing.sm,
-    alignItems: 'center',
-  },
   modeTabText: {
     fontSize: typography.sizes.base,
     fontFamily: typography.bodyMedium,
@@ -641,5 +689,9 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textAlign: 'center',
     lineHeight: 16,
+  },
+  footerLink: {
+    color: colors.teal,
+    textDecorationLine: 'underline',
   },
 });

@@ -15,6 +15,7 @@ import {
   Animated,
   Linking,
   Alert,
+  Image,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
@@ -22,7 +23,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, spacing, radius, gradients } from '../theme';
 import { useStore } from '../hooks/useStore';
 import { supabase, invokeEdgeFunction } from '../lib/supabase';
-import { customShopGate, hasBetaFullAccess, incrementCustomShopCount } from '../lib/subscription';
+import { hasBetaFullAccess } from '../lib/subscription';
 import { askClaudeOnce } from '../lib/anthropic';
 import { loadMemory, refreshMemory } from '../lib/memory';
 import type { UserPedal, FullExpertProfile } from '../lib/supabase';
@@ -31,7 +32,9 @@ import { GEAR_KNOWLEDGE_BASE } from '../lib/gearKnowledge';
 import { shareSoundDNA } from '../lib/share';
 import { PlayerOnboarding } from './PlayerOnboarding';
 import { HiddenShareCard } from './ShareCard';
+import { SocialShareSheet } from './index';
 import { useShareCard } from '../lib/useShareCard';
+import { captureRef } from 'react-native-view-shot';
 import Svg, { Polygon, Line, Circle, Text as SvgText, TSpan } from 'react-native-svg';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -195,31 +198,37 @@ function formatFullProfile(profile: FullExpertProfile): string {
 }
 
 
-// ─── Spider Web Chart ─────────────────────────────────────────────────────────
-// Full radar/spider-web chart using react-native-svg.
-// Grid springs in first, then the value polygon pops in on top — the HUZZAH moment.
+const tpcLogo = require('../../assets/tpc-final.png');
 
-const CHART_SIZE = 268;
-const CHART_CENTER = CHART_SIZE / 2;
-const MAX_R = 86;       // max radius for score = 10
-const LABEL_R = 118;    // radius for axis labels
+// ─── Spider Web Chart ─────────────────────────────────────────────────────────
+// Labels are rendered as absolutely-positioned Text components (not SVG text)
+// so they never clip regardless of screen size — SVG only draws grid + polygon.
+//
+// Layout:
+//   CONTAINER_SIZE × CONTAINER_SIZE outer View (positions labels absolutely)
+//   SVG_SIZE × SVG_SIZE centered inside it (grid rings, spokes, polygon, dots)
+//   Labels positioned at LABEL_R from SVG centre, converted to container coords
+
+const SVG_SIZE     = 210;
+const SVG_CENTER   = SVG_SIZE / 2;        // 105
+const MAX_R        = 78;                  // polygon radius at score = 10
+const LABEL_R      = 118;                 // label-centre radius from SVG centre
+const CONTAINER_SIZE = 350;              // outer container (labels live here)
+const SVG_OFFSET   = (CONTAINER_SIZE - SVG_SIZE) / 2;  // 70 — SVG inset each side
 
 const CHART_LABELS: Record<keyof SpiderValues, string> = {
-  drive: 'Drive',
-  modulation: 'Modulation',
-  timeSpace: 'Time/Space',
-  dynamics: 'Dynamics',
+  drive:        'Drive',
+  modulation:   'Modulation',
+  timeSpace:    'Time/Space',
+  dynamics:     'Dynamics',
   loopersMulti: 'Loopers',
   experimental: 'Experimental',
-  utility: 'Utility',
+  utility:      'Utility',
 };
 
-function getChartPoint(axisIndex: number, totalAxes: number, radius: number): [number, number] {
+function getPoint(axisIndex: number, totalAxes: number, radius: number, cx = SVG_CENTER, cy = SVG_CENTER): [number, number] {
   const angle = ((360 / totalAxes) * axisIndex - 90) * (Math.PI / 180);
-  return [
-    CHART_CENTER + radius * Math.cos(angle),
-    CHART_CENTER + radius * Math.sin(angle),
-  ];
+  return [cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)];
 }
 
 function ptsToStr(pts: [number, number][]): string {
@@ -227,138 +236,118 @@ function ptsToStr(pts: [number, number][]): string {
 }
 
 function SpiderChart({ values, animate = true }: { values: SpiderValues; animate?: boolean }) {
-  const gridScale = useRef(new Animated.Value(animate ? 0.15 : 1)).current;
+  const gridScale  = useRef(new Animated.Value(animate ? 0.15 : 1)).current;
   const valueScale = useRef(new Animated.Value(animate ? 0 : 1)).current;
   const hasAnimated = useRef(false);
 
   useEffect(() => {
     if (!animate || hasAnimated.current) return;
     hasAnimated.current = true;
-
-    Animated.spring(gridScale, {
-      toValue: 1,
-      tension: 40,
-      friction: 8,
-      useNativeDriver: true,
-    }).start();
-
+    Animated.spring(gridScale, { toValue: 1, tension: 40, friction: 8, useNativeDriver: true }).start();
     setTimeout(() => {
-      Animated.spring(valueScale, {
-        toValue: 1,
-        tension: 60,
-        friction: 6,
-        useNativeDriver: true,
-      }).start(() => {
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-      });
+      Animated.spring(valueScale, { toValue: 1, tension: 60, friction: 6, useNativeDriver: true })
+        .start(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy));
     }, 420);
   }, []);
 
   const n = SPIDER_AXES.length;
-
-  // Concentric ring polygons at scores 2, 4, 6, 8, 10
-  const rings = [2, 4, 6, 8, 10].map(score =>
-    SPIDER_AXES.map((_, i) => getChartPoint(i, n, (score / 10) * MAX_R))
-  );
-  const outerRing = rings[4]; // score=10 ring
-
-  // Value polygon — floor at 3px so zero axes show as a tiny center dot
+  const rings = [2, 4, 6, 8, 10].map(s => SPIDER_AXES.map((_, i) => getPoint(i, n, (s / 10) * MAX_R)));
+  const outerRing = rings[4];
   const valuePolygon = SPIDER_AXES.map((axis, i) =>
-    getChartPoint(i, n, Math.max(3, (values[axis.key] / 10) * MAX_R))
+    getPoint(i, n, Math.max(3, (values[axis.key] / 10) * MAX_R))
   );
 
   return (
-    <View style={chartStyles.chartWrap}>
-      {/* ── Grid layer — springs in ── */}
-      <Animated.View style={{ transform: [{ scale: gridScale }] }}>
-        <Svg width={CHART_SIZE} height={CHART_SIZE}>
-          {/* Concentric ring polygons */}
+    <View style={{ width: CONTAINER_SIZE, height: CONTAINER_SIZE }}>
+
+      {/* ── Grid + rings — springs in ── */}
+      <Animated.View style={[chartStyles.svgLayer, { transform: [{ scale: gridScale }] }]}>
+        <Svg width={SVG_SIZE} height={SVG_SIZE}>
           {rings.map((ring, ri) => (
-            <Polygon
-              key={`ring-${ri}`}
-              points={ptsToStr(ring)}
-              fill="none"
-              stroke={colors.border}
-              strokeWidth={ri === 4 ? 1.5 : 0.7}
-              opacity={ri === 4 ? 0.9 : 0.4}
-            />
+            <Polygon key={`ring-${ri}`} points={ptsToStr(ring)} fill="none"
+              stroke={colors.border} strokeWidth={ri === 4 ? 1.5 : 0.7} opacity={ri === 4 ? 0.9 : 0.4} />
           ))}
-
-          {/* Radial spokes */}
           {outerRing.map(([x, y], i) => (
-            <Line
-              key={`spoke-${i}`}
-              x1={CHART_CENTER} y1={CHART_CENTER}
-              x2={x} y2={y}
-              stroke={colors.border}
-              strokeWidth={0.7}
-              opacity={0.45}
-            />
+            <Line key={`spoke-${i}`} x1={SVG_CENTER} y1={SVG_CENTER} x2={x} y2={y}
+              stroke={colors.border} strokeWidth={0.7} opacity={0.45} />
           ))}
-
-          {/* Axis labels */}
-          {SPIDER_AXES.map((axis, i) => {
-            const [lx, ly] = getChartPoint(i, n, LABEL_R);
-            const isRight = lx > CHART_CENTER + 12;
-            const isLeft  = lx < CHART_CENTER - 12;
-            const anchor  = isRight ? 'start' : isLeft ? 'end' : 'middle';
-            return (
-              <SvgText key={`lbl-${i}`} fontSize={9.5} fill={colors.textMuted} fontFamily={typography.bodyMedium}>
-                <TSpan x={lx} y={ly - 4}  textAnchor={anchor}>{axis.emoji}</TSpan>
-                <TSpan x={lx} y={ly + 11} textAnchor={anchor}>{CHART_LABELS[axis.key]}</TSpan>
-              </SvgText>
-            );
-          })}
         </Svg>
       </Animated.View>
 
-      {/* ── Value layer — pops in after grid ── */}
-      <Animated.View
-        style={[
-          chartStyles.valueOverlay,
-          { transform: [{ scale: valueScale }], opacity: valueScale },
-        ]}
-      >
-        <Svg width={CHART_SIZE} height={CHART_SIZE}>
-          {/* Filled value polygon */}
-          <Polygon
-            points={ptsToStr(valuePolygon)}
-            fill={colors.teal + '2E'}
-            stroke={colors.teal}
-            strokeWidth={2.2}
-            strokeLinejoin="round"
-          />
-
-          {/* Colored dot at each axis value */}
+      {/* ── Value polygon — pops in after grid ── */}
+      <Animated.View style={[chartStyles.svgLayer, { transform: [{ scale: valueScale }], opacity: valueScale }]}>
+        <Svg width={SVG_SIZE} height={SVG_SIZE}>
+          <Polygon points={ptsToStr(valuePolygon)} fill={colors.teal + '30'}
+            stroke={colors.teal} strokeWidth={2.5} strokeLinejoin="round" />
           {SPIDER_AXES.map((axis, i) => {
             const [cx, cy] = valuePolygon[i];
             const score = values[axis.key];
             return (
-              <Circle
-                key={`dot-${i}`}
-                cx={cx} cy={cy}
-                r={score > 0 ? 5.5 : 3}
-                fill={score > 0 ? axis.color : colors.border}
-                stroke="#fff"
-                strokeWidth={1.5}
-              />
+              <Circle key={`dot-${i}`} cx={cx} cy={cy} r={score > 0 ? 6 : 3}
+                fill={score > 0 ? axis.color : colors.border} stroke="#fff" strokeWidth={1.5} />
             );
           })}
         </Svg>
       </Animated.View>
+
+      {/* ── Labels — React Native Text, absolutely positioned ── */}
+      {SPIDER_AXES.map((axis, i) => {
+        // Label centre in container coordinates
+        const angle = ((360 / n) * i - 90) * (Math.PI / 180);
+        const lx = SVG_OFFSET + SVG_CENTER + LABEL_R * Math.cos(angle);
+        const ly = SVG_OFFSET + SVG_CENTER + LABEL_R * Math.sin(angle);
+
+        const score = values[axis.key];
+        // Box centred on (lx, ly). 96px wide handles "Modulation" at 10px bold.
+        const BOX_W = 96; const BOX_H = 52;
+        return (
+          <View
+            key={axis.key}
+            style={{
+              position: 'absolute',
+              left: lx - BOX_W / 2,
+              top:  ly - BOX_H / 2,
+              width: BOX_W,
+              height: BOX_H,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <Text style={chartStyles.labelEmoji}>{axis.emoji}</Text>
+            <Text style={[chartStyles.labelText, { color: score >= 5 ? colors.textPrimary : colors.textSecondary }]}>
+              {CHART_LABELS[axis.key]}
+            </Text>
+            <Text style={[chartStyles.labelScore, { color: score >= 5 ? axis.color : colors.textMuted }]}>
+              {score.toFixed(1)}
+            </Text>
+          </View>
+        );
+      })}
     </View>
   );
 }
 
 const chartStyles = StyleSheet.create({
-  chartWrap: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  valueOverlay: {
+  svgLayer: {
     position: 'absolute',
-    top: 0,
-    left: 0,
+    top: SVG_OFFSET,
+    left: SVG_OFFSET,
+  },
+  labelEmoji: {
+    fontSize: 15,
+    lineHeight: 17,
+  },
+  labelText: {
+    fontSize: 10,
+    fontFamily: typography.bodySemiBold,
+    textAlign: 'center',
+    lineHeight: 12,
+  },
+  labelScore: {
+    fontSize: 11,
+    fontFamily: typography.bodySemiBold,
+    textAlign: 'center',
+    lineHeight: 14,
   },
 });
 
@@ -388,6 +377,8 @@ export function ExpertMode({ onBack }: Props) {
   const playerMemoryRef = useRef('');
 
   const { cardRef, cardData, triggerShare } = useShareCard();
+  const chartRef = useRef<View>(null);
+  const [chartShareOpen, setChartShareOpen] = useState(false);
 
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const fadeIn = useCallback(() => {
@@ -432,7 +423,7 @@ export function ExpertMode({ onBack }: Props) {
             return;
           }
         }
-        runAnalysis(saved);
+        runAnalysis(saved, true);
       } else {
         setStage('onboarding');
         fadeIn();
@@ -494,17 +485,21 @@ export function ExpertMode({ onBack }: Props) {
   };
 
   // ── Analysis ───────────────────────────────────────────────────────────────
-  const runAnalysis = async (expertProfile: FullExpertProfile) => {
-    // Gate: check if free tier allows another Custom Shop run
-    const isPro = Boolean(storeProfile?.is_premium) || hasBetaFullAccess();
-    const gate = await customShopGate(isPro);
-    if (!gate.allowed) {
-      openPaywall('custom_shop');
-      return;
-    }
-    // Increment run count on first-time gate pass (before interview starts)
-    if (gate.isFirstRun) {
-      incrementCustomShopCount().catch(() => {});
+  const runAnalysis = async (expertProfile: FullExpertProfile, skipInterview = false) => {
+    // Gate: server-side check — beta users bypass, everyone else hits the RPC.
+    // consume_custom_shop_run() atomically validates is_premium and the free-tier
+    // lifetime run limit, so AsyncStorage cannot be cleared to bypass it.
+    if (!hasBetaFullAccess()) {
+      const { data: gateData, error: gateErr } = await invokeEdgeFunction<{
+        allowed: boolean;
+        error?: string;
+        isFirstRun?: boolean;
+      }>('custom-shop-gate', {});
+
+      if (gateErr || !gateData?.allowed) {
+        openPaywall('custom_shop');
+        return;
+      }
     }
 
     setStage('analyzing');
@@ -519,19 +514,21 @@ export function ExpertMode({ onBack }: Props) {
       ? `You are a guitar effects expert. Analyze this guitarist's collection and profile.\n\nPlayer profile:\n${profileSummary}\n\nCurrent pedal collection: ${collectionSummary}\n\nCollection coverage (0-10):\n${SPIDER_AXES.map(a => `${a.label}: ${spider[a.key].toFixed(1)}`).join('\n')}\n\nWrite 2-3 sentences about their collection: what they're strong in, what's missing, and what their sound profile suggests. Be specific and reference their guitar heroes or tone identity if provided. Under 70 words.`
       : `You are a guitar effects expert. This guitarist is just starting out.\n\nPlayer profile:\n${profileSummary}\n\nThey have no pedals yet. Write 2-3 welcoming sentences about where to start based on their profile, referencing their tone identity or guitar heroes if provided. Under 60 words, end with enthusiasm.`;
 
+    // skipInterview is passed in as a param to avoid React state batching timing issues
+
     const [analysisResult, questionsResult] = await Promise.all([
       askClaudeOnce(
         analysisPrompt,
         'You are a concise, knowledgeable guitar effects advisor. Respond with plain text, no markdown.'
       ),
-      generateInterviewQuestions(expertProfile, collectionSummary),
+      skipInterview ? Promise.resolve([] as InterviewQuestion[]) : generateInterviewQuestions(expertProfile, collectionSummary),
     ]);
 
     setAnalysisText(analysisResult);
     setInterviewQuestions(questionsResult);
     setInterviewStep(0);
     setInterviewAnswers([]);
-    setStage('interview');   // questions first — spider reveal comes after
+    setStage('analysis');   // skip interview when profile exists — go straight to spider reveal
     fadeIn();
   };
 
@@ -906,7 +903,7 @@ ${signal ? `${signal}\n` : ''}${exclusionBlock}${rejectionBlock}Find the ideal n
               onPress={async () => {
                 Haptics.selectionAsync();
                 await updateRefreshTimer(6);
-                if (profile) runAnalysis(profile);
+                if (profile) runAnalysis(profile, true);
               }}
               activeOpacity={0.8}
             >
@@ -919,7 +916,7 @@ ${signal ? `${signal}\n` : ''}${exclusionBlock}${rejectionBlock}Find the ideal n
               onPress={async () => {
                 Haptics.selectionAsync();
                 await updateRefreshTimer(1);
-                if (profile) runAnalysis(profile);
+                if (profile) runAnalysis(profile, true);
               }}
               activeOpacity={0.8}
             >
@@ -948,16 +945,23 @@ ${signal ? `${signal}\n` : ''}${exclusionBlock}${rejectionBlock}Find the ideal n
           </View>
 
           {/* Spider web — the HUZZAH moment */}
-          <View style={styles.chartCard}>
-            <Text style={styles.chartTitle}>COLLECTION COVERAGE</Text>
+          <View ref={chartRef} collapsable={false} style={styles.chartCard}>
+            <Text style={styles.chartTitle}>SOUND DNA</Text>
             <SpiderChart values={spiderValues} />
+            {/* Branding footer — always visible in app + captured when sharing */}
+            <View style={styles.chartBrandRow}>
+              <Image source={tpcLogo} style={styles.chartBrandLogo} resizeMode="contain" />
+            </View>
           </View>
 
           {/* Share Sound DNA */}
           {spiderValues && (
             <TouchableOpacity
               style={styles.shareLink}
-              onPress={() => shareSoundDNA(spiderValues)}
+              onPress={() => {
+                Haptics.selectionAsync();
+                setChartShareOpen(true);
+              }}
               activeOpacity={0.7}
             >
               <Ionicons name="share-social-outline" size={14} color={colors.textMuted} />
@@ -978,23 +982,25 @@ ${signal ? `${signal}\n` : ''}${exclusionBlock}${rejectionBlock}Find the ideal n
             activeOpacity={0.8}
           >
             <LinearGradient colors={gradients.teal} style={styles.ctaBtn}>
-              <Text style={styles.ctaBtnText}>Build My Pick →</Text>
+              <Text style={styles.ctaBtnText}>Feed Your GAS →</Text>
             </LinearGradient>
           </TouchableOpacity>
 
-          {/* Redo interview */}
-          <TouchableOpacity
-            onPress={() => {
-              setInterviewStep(0);
-              setInterviewAnswers([]);
-              setStage('interview');
-              fadeIn();
-            }}
-            style={styles.subtleBackBtn}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.subtleBackBtnText}>← Change my answers</Text>
-          </TouchableOpacity>
+          {/* Redo interview — only shown if they actually went through interview questions */}
+          {interviewQuestions.length > 0 && (
+            <TouchableOpacity
+              onPress={() => {
+                setInterviewStep(0);
+                setInterviewAnswers([]);
+                setStage('interview');
+                fadeIn();
+              }}
+              style={styles.subtleBackBtn}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.subtleBackBtnText}>← Change my answers</Text>
+            </TouchableOpacity>
+          )}
         </Animated.View>
       )}
 
@@ -1054,6 +1060,41 @@ ${signal ? `${signal}\n` : ''}${exclusionBlock}${rejectionBlock}Find the ideal n
 
       {/* Off-screen share card — captured by useShareCard */}
       <HiddenShareCard cardRef={cardRef} cardData={cardData} />
+
+      {/* Sound DNA chart share sheet */}
+      <SocialShareSheet
+        visible={chartShareOpen}
+        onClose={() => setChartShareOpen(false)}
+        text={spiderValues ? [
+          'My guitar tone DNA 🕷️',
+          '',
+          `🔥 Drive/Dirt    ${spiderValues.drive.toFixed(1)}/10`,
+          `🌊 Modulation    ${spiderValues.modulation.toFixed(1)}/10`,
+          `✨ Time/Space    ${spiderValues.timeSpace.toFixed(1)}/10`,
+          `⚡ Dynamics      ${spiderValues.dynamics.toFixed(1)}/10`,
+          `🔄 Loopers/Multi ${spiderValues.loopersMulti.toFixed(1)}/10`,
+          `🎲 Experimental  ${spiderValues.experimental.toFixed(1)}/10`,
+          `🔧 Utility       ${spiderValues.utility.toFixed(1)}/10`,
+          '',
+          'Analyzed by The Pedal Collaborative',
+          '#guitarpedals #pedalboard #tonehunter',
+        ].join('\n') : ''}
+        onImageShare={async () => {
+          setChartShareOpen(false);
+          await new Promise<void>(resolve => setTimeout(resolve, 300));
+          if (chartRef.current) {
+            const uri = await captureRef(chartRef, {
+              format: 'png',
+              quality: 1,
+              result: 'tmpfile',
+            });
+            const Sharing = await import('expo-sharing');
+            if (await Sharing.isAvailableAsync()) {
+              await Sharing.shareAsync(uri, { mimeType: 'image/png', UTI: 'public.png' });
+            }
+          }
+        }}
+      />
 
       {/* ── Recommendation ─────────────────────────────────────────────────── */}
       {stage === 'recommendation' && recommendation && (
@@ -1126,7 +1167,7 @@ ${signal ? `${signal}\n` : ''}${exclusionBlock}${rejectionBlock}Find the ideal n
                   <ActivityIndicator size="small" color="#fff" />
                 ) : (
                   <Text style={styles.wishlistBtnText}>
-                    {wishlistState === 'added' ? '✓ In Wishlist' : '+ Wishlist'}
+                    {wishlistState === 'added' ? '✓ In GAS List' : '+ GAS List'}
                   </Text>
                 )}
               </LinearGradient>
@@ -1309,8 +1350,10 @@ const styles = StyleSheet.create({
   resetBtnText: { fontSize: typography.sizes.xs, fontFamily: typography.body, color: colors.textMuted, textDecorationLine: 'underline' },
   analysisCard: { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
   analysisText: { fontSize: typography.sizes.base, fontFamily: typography.body, color: colors.textSecondary, lineHeight: 23 },
-  chartCard: { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg, gap: spacing.md },
-  chartTitle: { fontSize: typography.sizes.xs, fontFamily: typography.bodySemiBold, color: colors.textMuted, letterSpacing: 1 },
+  chartCard: { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, paddingTop: spacing.lg, paddingBottom: spacing.md, paddingHorizontal: spacing.sm, gap: spacing.sm, alignItems: 'center' },
+  chartTitle: { fontSize: typography.sizes.xs, fontFamily: typography.bodySemiBold, color: colors.textMuted, letterSpacing: 1.5, textAlign: 'center' },
+  chartBrandRow: { alignItems: 'center', paddingTop: spacing.sm, borderTopWidth: 1, borderTopColor: colors.border, marginTop: spacing.xs },
+  chartBrandLogo: { width: 140, height: 28 },
   ctaBtn: { borderRadius: radius.lg, paddingVertical: spacing.base, alignItems: 'center' },
   ctaBtnText: { fontSize: typography.sizes.base, fontFamily: typography.bodySemiBold, color: '#fff' },
 

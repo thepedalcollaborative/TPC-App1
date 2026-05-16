@@ -11,11 +11,6 @@ const extra =
 const supabaseUrl = (extra.supabaseUrl as string) ?? '';
 const supabaseAnonKey = (extra.supabaseAnonKey as string) ?? '';
 
-if (__DEV__) {
-  const keyPreview = supabaseAnonKey ? `${supabaseAnonKey.slice(0, 10)}…${supabaseAnonKey.slice(-6)}` : 'missing';
-  console.log('[TPC] Supabase config', { supabaseUrl, supabaseAnonKey: keyPreview });
-}
-
 // Guard: ensure Supabase URL uses HTTPS so tokens are never sent over plaintext
 if (!supabaseUrl?.startsWith('https://')) {
   throw new Error('[TPC] Supabase URL must use HTTPS. Check app.json extra.supabaseUrl.');
@@ -79,6 +74,9 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: false,
+    // Explicit PKCE — required for native OAuth so the callback returns
+    // a ?code= query param instead of tokens in the URL hash (implicit flow).
+    flowType: 'pkce',
   },
 });
 

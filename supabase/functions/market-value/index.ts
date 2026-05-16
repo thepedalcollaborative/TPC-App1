@@ -4,6 +4,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 const REVERB_TOKEN = Deno.env.get('REVERB_TOKEN') ?? '';
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
 
 const REVERB_HEADERS = {
   'Accept': 'application/hal+json',
@@ -25,6 +26,25 @@ serve(async (req) => {
   }
 
   try {
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) {
+      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+        status: 401,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    const userClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const { data: { user }, error: authError } = await userClient.auth.getUser();
+    if (authError || !user) {
+      return new Response(JSON.stringify({ error: 'Invalid JWT' }), {
+        status: 401,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     const { pedal_id, brand, model } = await req.json() as {
       pedal_id: string;
       brand: string;
@@ -99,11 +119,11 @@ serve(async (req) => {
     const avgList = avg(listings);
     const avgSold = avg(sold);
 
-    // Weighted blend: 60% sold (more accurate), 40% listed
-    // Fall back to whichever is available
+    // Sold at full weight (1.0), active listings at half weight (0.5).
+    // Fall back to whichever is available.
     let marketValue: number | null = null;
     if (avgSold !== null && avgList !== null) {
-      marketValue = avgSold * 0.6 + avgList * 0.4;
+      marketValue = (avgSold * 1.0 + avgList * 0.5) / 1.5;
     } else if (avgSold !== null) {
       marketValue = avgSold;
     } else if (avgList !== null) {

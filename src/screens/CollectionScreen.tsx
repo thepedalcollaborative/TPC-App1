@@ -17,6 +17,7 @@ import {
   Image,
   Linking,
   Animated,
+  ActionSheetIOS,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
@@ -37,13 +38,13 @@ import { NetworkErrorView } from '../components/NetworkErrorView';
 import { classifyError, extractHttpStatus, type ClassifiedError } from '../lib/networkError';
 import type { CollectionPedal, PriceMode } from '../components';
 import { TabParamList } from '../types/navigation';
-import { reverbAffiliateUrl } from '../lib/reverb';
+import { reverbSearchUrl } from '../lib/reverb';
 import { shareGasList, shareNewPedal, shareFsftList, shareCollectionList, shareAsImage, type FsftPedal } from '../lib/share';
 import { hasBetaFullAccess } from '../lib/subscription';
 import { useFormatMoney } from '../hooks/useFormatMoney';
 import { captureRef } from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
 
 // Date helpers: DB stores YYYY-MM-DD, UI shows MM-DD-YYYY
@@ -200,6 +201,10 @@ export default function CollectionScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
+  // Scan-to-add: runs picker from the main screen (no Modal in the VC stack)
+  // then opens AddPedalModal with the identified query pre-filled.
+  const [isScanningMain, setIsScanningMain] = useState(false);
+  const [scanInitialSearch, setScanInitialSearch] = useState<string | null>(null);
 
   // Share nudge — shown briefly after an owned pedal is added
   const [shareNudge, setShareNudge] = useState<{ brand: string; model: string } | null>(null);
@@ -215,6 +220,90 @@ export default function CollectionScreen() {
     }, 5000);
   }, [nudgeOpacity]);
   useEffect(() => () => { if (nudgeDismissRef.current) clearTimeout(nudgeDismissRef.current); }, []);
+
+  // ── Scan-to-add ─────────────────────────────────────────────────────────────
+  // The picker MUST run from the main screen (no Modal in the VC stack).
+  // reopenModalRef: when scan is triggered from inside AddPedalModal, we close
+  // the modal first, run the scan, then reopen (with results on success, or
+  // empty on cancel/error so the user can try again manually).
+  const reopenModalAfterScan = useRef(false);
+
+  const doScanFromMainScreen = useCallback(async (useCamera: boolean) => {
+    if (useCamera) {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permission needed', 'Please allow camera access in Settings.');
+        if (reopenModalAfterScan.current) { reopenModalAfterScan.current = false; setShowAddModal(true); }
+        return;
+      }
+    } else {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permission needed', 'Please allow photo library access in Settings.');
+        if (reopenModalAfterScan.current) { reopenModalAfterScan.current = false; setShowAddModal(true); }
+        return;
+      }
+    }
+    setIsScanningMain(true);
+    try {
+      const result = useCamera
+        ? await ImagePicker.launchCameraAsync({ quality: 0.8, exif: false })
+        : await ImagePicker.launchImageLibraryAsync({
+            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            quality: 0.8, exif: false,
+          });
+      if (result.canceled || !result.assets?.[0]?.uri) {
+        // User cancelled — reopen modal if we came from it
+        if (reopenModalAfterScan.current) { reopenModalAfterScan.current = false; setShowAddModal(true); }
+        return;
+      }
+      const processed = await ImageManipulator.manipulateAsync(
+        result.assets[0].uri,
+        [{ resize: { width: 800 } }],
+        { compress: 0.65, format: ImageManipulator.SaveFormat.JPEG }
+      );
+      const base64 = await FileSystem.readAsStringAsync(processed.uri, { encoding: 'base64' });
+      const { data, error } = await invokeEdgeFunction<{ brand: string; model: string }>('scan-pedal', {
+        imageBase64: base64, mediaType: 'image/jpeg',
+      });
+      if (error || !data?.brand) {
+        Alert.alert("Couldn't identify", "Try a clearer photo or search manually.");
+        if (reopenModalAfterScan.current) { reopenModalAfterScan.current = false; setShowAddModal(true); }
+        return;
+      }
+      const query = `${data.brand} ${data.model}`.trim();
+      setScanInitialSearch(query);
+      // Give iOS extra time to fully settle the VC hierarchy after the picker
+      // dismisses before presenting the Modal. In Expo Go the hierarchy is more
+      // complex and needs a longer window than in a standalone build.
+      setTimeout(() => {
+        setShowAddModal(true);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }, 600);
+    } catch (e) {
+      console.error('[Scan]', e);
+      Alert.alert('Scan failed', 'Something went wrong. Try searching manually.');
+      if (reopenModalAfterScan.current) { setShowAddModal(true); }
+    } finally {
+      setIsScanningMain(false);
+      reopenModalAfterScan.current = false;
+    }
+  }, []);
+
+  // The single "Add a Pedal" button — shows three paths.
+  const handleAddPedalPress = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    Alert.alert('Add a Pedal', 'How would you like to add it?', [
+      // setTimeout lets the Alert dismiss animation fully complete before
+      // any native picker VC is presented — avoids presentation race crash.
+      { text: 'Take Photo', onPress: () => setTimeout(() => doScanFromMainScreen(true), 400) },
+      { text: 'Photo Library', onPress: () => setTimeout(() => doScanFromMainScreen(false), 400) },
+      { text: 'Add Manually', onPress: () => setShowAddModal(true) },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [doScanFromMainScreen]);
+  // ────────────────────────────────────────────────────────────────────────────
+
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [detailPedal, setDetailPedal] = useState<UserPedal | null>(null);
   const [showReassignModal, setShowReassignModal] = useState(false);
@@ -545,6 +634,16 @@ export default function CollectionScreen() {
     navigation.setParams({ openAddModal: undefined });
   }, [route.params?.openAddModal, navigation]);
 
+  useEffect(() => {
+    const scan = route.params?.triggerScan;
+    if (!scan) return;
+    navigation.setParams({ triggerScan: undefined });
+    // Small delay so the tab navigation animation finishes before the
+    // native picker is presented — avoids any VC hierarchy issues.
+    const t = setTimeout(() => doScanFromMainScreen(scan === 'camera'), 400);
+    return () => clearTimeout(t);
+  }, [route.params?.triggerScan, navigation, doScanFromMainScreen]);
+
   // Filtered list
   const rawList = activeTab === 'owned' ? ownedPedals : activeTab === 'wishlist' ? wishlistPedals : listedPedals;
   const filtered = rawList.filter(p => {
@@ -726,13 +825,39 @@ export default function CollectionScreen() {
     setChainLoading(false);
   };
 
+  // Track keyboard visibility for closeDetail (same pattern as AddPedalModal)
+  const detailKbVisibleRef = useRef(false);
+  useEffect(() => {
+    const s = Keyboard.addListener('keyboardWillShow', () => { detailKbVisibleRef.current = true; });
+    const h = Keyboard.addListener('keyboardDidHide',  () => { detailKbVisibleRef.current = false; });
+    return () => { s.remove(); h.remove(); };
+  }, []);
+
   const closeDetail = () => {
-    setShowDetailModal(false);
-    setDetailPedal(null);
-    setRetiredReason(null);
-    setListingStatus(null);
-    setAskingPrice('');
-    navigation.setParams({ openPedalId: undefined });
+    const doClose = () => {
+      setShowDetailModal(false);
+      setDetailPedal(null);
+      setRetiredReason(null);
+      setListingStatus(null);
+      setAskingPrice('');
+      navigation.setParams({ openPedalId: undefined });
+    };
+
+    if (detailKbVisibleRef.current) {
+      Keyboard.dismiss();
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        hideSub.remove();
+        clearTimeout(fallback);
+        doClose();
+      };
+      const hideSub = Keyboard.addListener('keyboardDidHide', settle);
+      const fallback = setTimeout(settle, 500);
+    } else {
+      doClose();
+    }
   };
 
   const fetchWishlistListings = async (item: UserPedal, sort: 'newest' | 'price') => {
@@ -908,37 +1033,64 @@ export default function CollectionScreen() {
     closeDetail();
   };
 
-  const handlePickPhoto = async (useCamera: boolean) => {
+  // Saved before closing the detail modal so doPickPhotoFromMain can use it.
+  const photoPickRef = useRef<{ pedalId: string; userId: string; useCamera: boolean } | null>(null);
+
+  // Close the detail modal FIRST so the picker has a clean VC stack,
+  // then reopen after the photo is taken/uploaded.
+  const handlePickPhoto = (useCamera: boolean) => {
     if (!detailPedal || !session?.user) return;
-    const pedalId = detailPedal.id;
+    photoPickRef.current = { pedalId: detailPedal.id, userId: session.user.id, useCamera };
+    setShowDetailModal(false);
+    setTimeout(() => doPickPhotoFromMain(), 400);
+  };
+
+  const doPickPhotoFromMain = useCallback(async () => {
+    const ctx = photoPickRef.current;
+    if (!ctx) return;
+    const { pedalId, userId, useCamera } = ctx;
+    photoPickRef.current = null;
+
+    const reopenDetail = () => {
+      const all = [
+        ...useStore.getState().ownedPedals,
+        ...useStore.getState().wishlistPedals,
+        ...useStore.getState().retiredPedals,
+      ];
+      const found = all.find(p => p.id === pedalId);
+      if (found) openDetail(found);
+    };
+
     if (useCamera) {
       const perm = await ImagePicker.requestCameraPermissionsAsync();
       if (!perm.granted) {
         Alert.alert('Permission needed', 'Please allow camera access to take a pedal photo.');
+        reopenDetail();
         return;
       }
     } else {
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
         Alert.alert('Permission needed', 'Please allow photo library access to upload a pedal photo.');
+        reopenDetail();
         return;
       }
     }
     const result = useCamera
-      ? await ImagePicker.launchCameraAsync({
-          allowsEditing: true,
-          quality: 0.85,
-        })
+      ? await ImagePicker.launchCameraAsync({ allowsEditing: true, quality: 0.85 })
       : await ImagePicker.launchImageLibraryAsync({
           mediaTypes: ImagePicker.MediaTypeOptions.Images,
           allowsEditing: true,
           quality: 0.85,
         });
-    if (result.canceled || !result.assets?.[0]?.uri) return;
+    if (result.canceled || !result.assets?.[0]?.uri) {
+      reopenDetail();
+      return;
+    }
     setUploadingPhoto(true);
     try {
       const asset = result.assets[0];
-      const basePath = `${session.user.id}/pedals/${detailPedal.id}/${Date.now()}`;
+      const basePath = `${userId}/pedals/${pedalId}/${Date.now()}`;
       const path = `${basePath}.jpg`;
       const thumbPath = `${basePath}_sm.jpg`;
       const [fullAsset, thumbAsset] = await Promise.all([
@@ -979,7 +1131,7 @@ export default function CollectionScreen() {
       const { error: updateError } = await supabase
         .from('user_pedals')
         .update({ user_image_path: path })
-        .eq('id', detailPedal.id);
+        .eq('id', pedalId);
       if (updateError) throw updateError;
 
       const [{ data: signed }, { data: signedThumb }] = await Promise.all([
@@ -989,9 +1141,7 @@ export default function CollectionScreen() {
       const fullUrl = signed?.signedUrl ?? null;
       const thumbUrl = signedThumb?.signedUrl ?? fullUrl;
       if (fullUrl) {
-        setDetailUserImageUrl(fullUrl);
-        setDetailImageFailed(false);
-        // Optimistically update store maps so the userImageUrls effect doesn't wipe the image
+        // Optimistically update store so the detail modal shows the new photo immediately
         useStore.setState(s => ({
           userImageUrls: { ...s.userImageUrls, [pedalId]: fullUrl },
           userImageThumbUrls: thumbUrl ? { ...s.userImageThumbUrls, [pedalId]: thumbUrl } : s.userImageThumbUrls,
@@ -1001,13 +1151,15 @@ export default function CollectionScreen() {
         }));
       }
       refreshUserImages(); // non-blocking: updates persistent cache
+      reopenDetail(); // reopen the detail modal with the updated pedal
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Could not upload photo. Please try again.';
       Alert.alert('Upload failed', message);
+      reopenDetail();
     } finally {
       setUploadingPhoto(false);
     }
-  };
+  }, [openDetail, refreshUserImages]);
 
   const handleRemovePedal = () => {
     if (!detailPedal) return;
@@ -1424,10 +1576,8 @@ export default function CollectionScreen() {
           <TouchableOpacity
             style={styles.actionFull}
             activeOpacity={0.85}
-            onPress={() => {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-              setShowAddModal(true);
-            }}
+            disabled={isScanningMain}
+            onPress={handleAddPedalPress}
           >
             <LinearGradient
               colors={
@@ -1437,8 +1587,13 @@ export default function CollectionScreen() {
               }
               style={styles.actionFullCard}
             >
-              <Ionicons name="add-circle" size={20} color="#fff" />
-              <Text style={styles.actionHalfTitle}>Add a Pedal</Text>
+              {isScanningMain
+                ? <ActivityIndicator size="small" color="#fff" />
+                : <Ionicons name="camera-outline" size={20} color="#fff" />
+              }
+              <Text style={styles.actionHalfTitle}>
+                {isScanningMain ? 'Identifying…' : 'Add a Pedal'}
+              </Text>
             </LinearGradient>
           </TouchableOpacity>
         </View>
@@ -1615,14 +1770,16 @@ export default function CollectionScreen() {
       {/* ── Add Pedal Modal ── */}
       <AddPedalModal
         visible={showAddModal}
-        onClose={() => setShowAddModal(false)}
+        onClose={() => { setShowAddModal(false); setScanInitialSearch(null); }}
         onAdded={(brand, model, isOwned) => {
           setShowAddModal(false);
+          setScanInitialSearch(null);
           fetchPedals();
           if (isOwned && brand && model) showShareNudge(brand, model);
         }}
         session={session}
         defaultTab={activeTab}
+        initialSearch={scanInitialSearch}
       />
 
       {/* ── Pedal Detail Modal ── */}
@@ -1638,13 +1795,13 @@ export default function CollectionScreen() {
         >
           <TouchableOpacity style={styles.modalBackdrop} onPress={closeDetail} activeOpacity={1} />
           <SwipeDismissSheet style={styles.modalSheet} onDismiss={closeDetail}>
+            <TouchableOpacity onPress={closeDetail} activeOpacity={0.7} style={styles.modalCloseBtn} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
+              <Ionicons name="close" size={24} color={colors.textMuted} />
+            </TouchableOpacity>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>
                 {detailPedal?.pedal ? `${detailPedal.pedal.brand} ${detailPedal.pedal.model}` : 'Edit Pedal'}
               </Text>
-              <TouchableOpacity onPress={closeDetail} activeOpacity={0.7} style={{ padding: spacing.sm }}>
-                <Ionicons name="close" size={20} color={colors.textMuted} />
-              </TouchableOpacity>
             </View>
 
             <KeyboardAwareScrollView
@@ -1699,7 +1856,7 @@ export default function CollectionScreen() {
                       )}
 
                       <View style={styles.wishlistHeaderRow}>
-                        <Text style={styles.sectionLabel}>Reverb Listings</Text>
+                        <Text style={styles.sectionLabel}>REVERB LISTINGS</Text>
                         <View style={styles.sortRow}>
                           {(['newest', 'price'] as const).map(opt => (
                             <TouchableOpacity
@@ -1735,37 +1892,65 @@ export default function CollectionScreen() {
                         />
                       ) : wishlistListings.length === 0 ? (
                         <Text style={styles.helperText}>No listings found right now.</Text>
-                      ) : (
-                        <View style={styles.wishlistList}>
-                          {wishlistListings.map((l, idx) => (
+                      ) : (() => {
+                        const searchQuery = `${detailPedal?.pedal?.brand ?? ''} ${detailPedal?.pedal?.model ?? ''}`.trim();
+                        const openSearch = () => {
+                          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                          Linking.openURL(reverbSearchUrl(searchQuery));
+                        };
+                        const prices = wishlistListings
+                          .map(l => l.price)
+                          .filter((p): p is number => p != null);
+                        const fmt = (n: number) =>
+                          new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n);
+                        const minP = prices.length ? Math.min(...prices) : null;
+                        const maxP = prices.length ? Math.max(...prices) : null;
+                        const avgP = prices.length
+                          ? Math.round(prices.reduce((a, b) => a + b, 0) / prices.length)
+                          : null;
+                        return (
+                          <>
+                            {/* ── Market summary card ── */}
                             <TouchableOpacity
-                              key={`${l.title}-${idx}`}
-                              style={styles.wishlistRow}
+                              style={styles.reverbSummaryCard}
                               activeOpacity={0.8}
-                              onPress={() => {
-                                if (l.url) Linking.openURL(reverbAffiliateUrl(l.url));
-                              }}
+                              onPress={openSearch}
                             >
-                              <View style={styles.wishlistTextBlock}>
-                                <Text style={styles.wishlistTitle} numberOfLines={2}>{l.title}</Text>
-                                <Text style={styles.wishlistMeta}>
-                                  {l.condition ? `${l.condition} • ` : ''}
-                                  {l.date ?? 'Date unknown'}
+                              <View>
+                                <Text style={styles.reverbSummaryCount}>
+                                  {wishlistListings.length} listing{wishlistListings.length !== 1 ? 's' : ''} available
                                 </Text>
+                                {minP != null && maxP != null && (
+                                  <Text style={styles.reverbSummaryRange}>
+                                    {minP === maxP ? fmt(minP) : `${fmt(minP)} – ${fmt(maxP)}`}
+                                    {avgP != null ? `  ·  avg ${fmt(avgP)}` : ''}
+                                  </Text>
+                                )}
                               </View>
-                              <Text style={styles.wishlistPrice}>
-                                {l.price != null
-                                  ? new Intl.NumberFormat('en-US', {
-                                      style: 'currency',
-                                      currency: l.currency ?? 'USD',
-                                      maximumFractionDigits: 0,
-                                    }).format(l.price)
-                                  : '—'}
-                              </Text>
+                              <Text style={styles.reverbSummaryCTA}>Shop on Reverb →</Text>
                             </TouchableOpacity>
-                          ))}
-                        </View>
-                      )}
+
+                            {/* ── Individual listings (tap → search) ── */}
+                            <View style={styles.wishlistList}>
+                              {wishlistListings.map((l, idx) => (
+                                <TouchableOpacity
+                                  key={`${l.title}-${idx}`}
+                                  style={styles.wishlistRow}
+                                  activeOpacity={0.8}
+                                  onPress={openSearch}
+                                >
+                                  <View style={styles.wishlistTextBlock}>
+                                    <Text style={styles.wishlistTitle} numberOfLines={2}>{l.title}</Text>
+                                  </View>
+                                  <Text style={styles.wishlistPrice}>
+                                    {l.price != null ? fmt(l.price) : '—'}
+                                  </Text>
+                                </TouchableOpacity>
+                              ))}
+                            </View>
+                          </>
+                        );
+                      })()}
                     </>
                   ) : (
                     <>
@@ -2636,11 +2821,11 @@ export default function CollectionScreen() {
             {/* ── Reassign overlay — lives inside the sheet to avoid nested-modal iOS issue ── */}
             {showReassignModal && (
               <View style={styles.reassignOverlay}>
+                <TouchableOpacity onPress={closeReassign} activeOpacity={0.7} style={styles.modalCloseBtn} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
+                  <Ionicons name="close" size={24} color={colors.textMuted} />
+                </TouchableOpacity>
                 <View style={styles.modalHeader}>
                   <Text style={styles.modalTitle}>Reassign Pedal</Text>
-                  <TouchableOpacity onPress={closeReassign} activeOpacity={0.7} style={{ padding: spacing.sm }}>
-                    <Ionicons name="close" size={20} color={colors.textMuted} />
-                  </TouchableOpacity>
                 </View>
                 {detailPedal?.pedal && (
                   <View style={styles.reassignCurrentRow}>
@@ -2819,12 +3004,12 @@ export default function CollectionScreen() {
             onPress={() => setShareConfigOpen(false)}
           />
           <SwipeDismissSheet style={styles.collectionModalSheet} onDismiss={() => setShareConfigOpen(false)}>
+            <TouchableOpacity onPress={() => setShareConfigOpen(false)} activeOpacity={0.7} style={styles.modalCloseBtn} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
+              <Ionicons name="close" size={24} color={colors.textMuted} />
+            </TouchableOpacity>
             {/* Header */}
             <View style={styles.collectionModalHeader}>
               <Text style={styles.collectionModalTitle}>{shareSource === 'gas' ? 'Share My GAS List' : 'Share My Collection'}</Text>
-              <TouchableOpacity onPress={() => setShareConfigOpen(false)} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
-                <Ionicons name="close" size={20} color={colors.textMuted} />
-              </TouchableOpacity>
             </View>
 
             <ScrollView showsVerticalScrollIndicator={false} style={{ flexGrow: 0 }}>
@@ -3036,6 +3221,7 @@ type AddPedalModalProps = {
   onAdded: (brand?: string, model?: string, isOwned?: boolean) => void;
   session: Session | null;
   defaultTab: 'owned' | 'wishlist' | 'listed';
+  initialSearch?: string | null;
 };
 
 type ReverbResult = {
@@ -3048,7 +3234,7 @@ type ReverbResult = {
   pedal_id: string | null;
 };
 
-function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPedalModalProps) {
+function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initialSearch }: AddPedalModalProps) {
   const ownedPedals = useStore(s => s.ownedPedals);
   const profile = useStore(s => s.profile);
   const { fmt } = useFormatMoney();
@@ -3090,10 +3276,23 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
   const [manualCategory, setManualCategory] = useState('drive');
   const [isUpsertingManual, setIsUpsertingManual] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Track whether the keyboard is currently visible so handleClose can decide
+  // whether to wait for keyboardDidHide before unmounting the modal.
+  const keyboardVisibleRef = useRef(false);
+
+  useEffect(() => {
+    const showSub = Keyboard.addListener('keyboardWillShow', () => { keyboardVisibleRef.current = true; });
+    const hideSub  = Keyboard.addListener('keyboardDidHide',  () => { keyboardVisibleRef.current = false; });
+    return () => { showSub.remove(); hideSub.remove(); };
+  }, []);
 
   useEffect(() => {
     if (visible) {
       setAcquisitionType(defaultTab === 'wishlist' ? 'wishlist' : 'bought');
+      // If opened via scan, auto-run the search with the identified query
+      if (initialSearch) {
+        handleSearch(initialSearch);
+      }
     }
   }, [defaultTab, visible]);
 
@@ -3163,8 +3362,11 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
     }, 400);
   }, []);
 
+  const selectingPedalRef = useRef<string | null>(null);
+
   const handleSelectPedal = async (pedal: Pedal) => {
     Haptics.selectionAsync();
+    selectingPedalRef.current = pedal.id;
     setSelectedPedal(pedal);
     setAddError('');
     setAcquisitionType(prev => prev ?? (defaultTab === 'wishlist' ? 'wishlist' : 'bought'));
@@ -3188,6 +3390,9 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
       .select('*')
       .eq('pedal_id', pedal.id)
       .order('is_default', { ascending: false });
+    // Bail out if the modal was closed or a different pedal was selected while we awaited
+    if (selectingPedalRef.current !== pedal.id) return;
+    selectingPedalRef.current = null;
     const list = (data as PedalColorway[]) ?? [];
     setColorways(list);
     const def = list.find(c => c.is_default);
@@ -3440,31 +3645,64 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
   };
 
   const handleClose = () => {
-    setSearch('');
-    setResults([]);
-    setReverbResults([]);
-    setSelectedPedal(null);
-    setColorways([]);
-    setSelectedColorwayId(null);
-    setShowAddColorway(false);
-    setNewColorwayName('');
-    setNewColorwayHex('');
-    setColorwaySubmitError('');
-    setPricePaid('');
-    setAcquisitionType(defaultTab === 'wishlist' ? 'wishlist' : 'bought');
-    setAcquiredDate('');
-    setAcquiredFrom('');
-    setAcquiredNotes('');
-    setTradeWith('');
-    setTradeQuery('');
-    setTradePedal(null);
-    setCategoryOverride(null);
-    setAddError('');
-    setShowManualAdd(false);
-    setManualBrand('');
-    setManualModel('');
-    setManualCategory('drive');
-    onClose();
+    // Cancel any in-flight debounce search so it doesn't fire after close
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    // Cancel any in-flight colorway fetch
+    selectingPedalRef.current = null;
+
+    const doClose = () => {
+      setSearch('');
+      setResults([]);
+      setReverbResults([]);
+      setIsSearching(false);
+      setSelectedPedal(null);
+      setColorways([]);
+      setSelectedColorwayId(null);
+      setLoadingColorways(false);
+      setShowAddColorway(false);
+      setNewColorwayName('');
+      setNewColorwayHex('');
+      setColorwaySubmitError('');
+      setPricePaid('');
+      setAcquisitionType(defaultTab === 'wishlist' ? 'wishlist' : 'bought');
+      setAcquiredDate('');
+      setAcquiredFrom('');
+      setAcquiredNotes('');
+      setTradeWith('');
+      setTradeQuery('');
+      setTradePedal(null);
+      setCategoryOverride(null);
+      setAddError('');
+      setShowManualAdd(false);
+      setManualBrand('');
+      setManualModel('');
+      setManualCategory('drive');
+      onClose();
+    };
+
+    if (keyboardVisibleRef.current) {
+      // Keyboard is up — dismiss it and wait for the native animation to fully
+      // complete before touching any modal state or visibility. A fixed timeout
+      // is unreliable; keyboardDidHide fires exactly when the animation ends.
+      Keyboard.dismiss();
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        hideSub.remove();
+        clearTimeout(fallback);
+        doClose();
+      };
+      const hideSub = Keyboard.addListener('keyboardDidHide', settle);
+      // Safety net: if keyboardDidHide somehow never fires, close after 500ms.
+      const fallback = setTimeout(settle, 500);
+    } else {
+      // No keyboard — no animation to wait for, close immediately.
+      doClose();
+    }
   };
 
   return (
@@ -3476,17 +3714,18 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
     >
       <KeyboardAvoidingView
         style={styles.modalOverlay}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={0}
+        behavior={undefined}
       >
         <TouchableOpacity style={styles.modalBackdrop} onPress={handleClose} activeOpacity={1} />
         <SwipeDismissSheet style={styles.modalSheet} onDismiss={handleClose}>
 
+          {/* Corner close button */}
+          <TouchableOpacity onPress={handleClose} activeOpacity={0.7} style={styles.modalCloseBtn} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
+            <Ionicons name="close" size={24} color={colors.textMuted} />
+          </TouchableOpacity>
+
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Add Pedal</Text>
-            <TouchableOpacity onPress={handleClose} activeOpacity={0.7} style={{ padding: spacing.sm }}>
-              <Ionicons name="close" size={20} color={colors.textMuted} />
-            </TouchableOpacity>
           </View>
 
           {/* Acquisition type (first step) */}
@@ -3524,19 +3763,21 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
               onChangeText={handleSearch}
               placeholder="Search by brand or model..."
               placeholderTextColor={colors.textMuted}
-              autoFocus={!selectedPedal}
+              autoFocus={!selectedPedal && !initialSearch}
             />
             {isSearching && <ActivityIndicator size="small" color={colors.teal} />}
           </View>
 
           {/* Results or selected pedal */}
           {selectedPedal ? (
-            <ScrollView
+            <KeyboardAwareScrollView
               style={styles.selectedPedalWrap}
               contentContainerStyle={styles.selectedPedalContent}
-              ref={detailScrollRef}
+              innerRef={(ref) => { (detailScrollRef as any).current = ref; }}
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
+              enableOnAndroid
+              extraScrollHeight={16}
             >
               <View style={styles.selectedPedal}>
                 <View style={styles.selectedPedalInfo}>
@@ -3833,7 +4074,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab }: AddPe
               >
                 <Text style={styles.addBtnPreviousText}>Add as Previous (used to own)</Text>
               </TouchableOpacity>
-            </ScrollView>
+            </KeyboardAwareScrollView>
           ) : (
             <ScrollView
               style={styles.resultsList}
@@ -4212,6 +4453,19 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.teal + '40',
   },
+  scanActionBtn: {
+    // square button, sits to the left of "Add a Pedal"
+  },
+  scanActionCard: {
+    width: 48,
+    height: 48,
+    borderRadius: radius.xl,
+    borderWidth: 1.5,
+    borderColor: colors.teal + '50',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.teal + '10',
+  },
   actionFull: {
     flex: 1,
   },
@@ -4264,12 +4518,16 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
     marginBottom: spacing.md,
   },
+  modalCloseBtn: {
+    position: 'absolute',
+    top: spacing.md,
+    right: spacing.md,
+    zIndex: 10,
+    padding: spacing.xs,
+  },
   modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
     marginBottom: spacing.base,
-    paddingRight: spacing.lg,
+    paddingRight: spacing.xl, // leave room for the absolute-positioned X
   },
   modalTitle: {
     fontSize: typography.sizes.lg,
@@ -4294,6 +4552,34 @@ const styles = StyleSheet.create({
     fontSize: typography.sizes.base,
     fontFamily: typography.body,
     color: colors.textPrimary,
+  },
+  scanBtn: {
+    padding: 2,
+  },
+  scanBtns: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginLeft: spacing.xs,
+  },
+  scanChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.teal + '15',
+    borderWidth: 1,
+    borderColor: colors.teal + '40',
+    borderRadius: radius.full,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 5,
+    marginBottom: spacing.sm,
+    alignSelf: 'flex-start',
+  },
+  scanChipText: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.bodyMedium,
+    color: colors.teal,
+    flex: 1,
   },
   detailContent: {
     paddingBottom: spacing.lg,
@@ -4706,6 +4992,34 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.base,
     alignItems: 'center',
     gap: spacing.sm,
+  },
+  reverbSummaryCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    marginTop: spacing.sm,
+  },
+  reverbSummaryCount: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodyMedium,
+    color: colors.textSecondary,
+    marginBottom: 2,
+  },
+  reverbSummaryRange: {
+    fontSize: typography.sizes.md,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textPrimary,
+  },
+  reverbSummaryCTA: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodyMedium,
+    color: colors.teal,
   },
   wishlistList: {
     marginTop: spacing.sm,

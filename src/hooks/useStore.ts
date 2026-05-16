@@ -6,6 +6,7 @@ import { supabase, Pedal, UserPedal, Board, UserProfile, invokeEdgeFunction, Sec
 import type { PaywallReason } from '../screens/PaywallScreen';
 import { hasBetaFullAccess } from '../lib/subscription';
 import type { LastPick } from '../lib/subscription';
+import { CURRENCIES, type CurrencyCode } from '../lib/formatMoney';
 
 let marketValuesRefreshInFlight = false;
 let imageEnrichmentInFlight = false;
@@ -67,6 +68,16 @@ type Store = {
   userImageThumbUrls: Record<string, string>; // user_pedal_id -> signed thumb url
   viewMode: 'tile' | 'text';
   setViewMode: (mode: 'tile' | 'text') => void;
+
+  // Preferences
+  wifeMode: boolean;
+  setWifeMode: (v: boolean) => void;
+  currency: CurrencyCode;
+  setCurrency: (c: CurrencyCode) => void;
+  /** Live exchange rates keyed by currency code, base USD (e.g. { GBP: 0.79 }) */
+  exchangeRates: Record<string, number>;
+  fetchExchangeRates: () => Promise<void>;
+
   fetchPedals: () => Promise<void>;
   fetchMarketValues: () => Promise<void>;
   refreshUserImages: (list?: UserPedal[]) => Promise<void>;
@@ -363,8 +374,19 @@ export const useStore = create<Store>((set, get) => ({
         return;
       }
 
-      // Keep app stable even if user_profiles row is temporarily missing.
-      // DB should still be backfilled, but this prevents UI/gating crashes.
+      // Profile row still missing after upsert attempt.
+      // Always prefer cache over a bare fallback — the cache carries the real
+      // is_premium value and avoids a transient free-tier demotion.
+      try {
+        const cached = await SecureStorageAdapter.getItem(profileCacheKey);
+        if (cached) {
+          set({ profile: JSON.parse(cached) as UserProfile });
+          return;
+        }
+      } catch {}
+      // Absolute last resort — no DB row, no cache. Never set is_premium: false
+      // for users who may be Pro; use the beta flag as a floor, but leave
+      // is_premium undefined so server-side gates (not client state) decide access.
       set({
         profile: {
           id: userId,
@@ -382,12 +404,6 @@ export const useStore = create<Store>((set, get) => ({
           created_at: new Date().toISOString(),
         } as UserProfile,
       });
-      try {
-        const cached = await SecureStorageAdapter.getItem(profileCacheKey);
-        if (cached) {
-          set({ profile: JSON.parse(cached) as UserProfile });
-        }
-      } catch {}
     }
   },
 
@@ -406,6 +422,53 @@ export const useStore = create<Store>((set, get) => ({
   setViewMode: (mode) => {
     set({ viewMode: mode });
     AsyncStorage.setItem('tpc_view_mode', mode).catch(() => {});
+  },
+
+  wifeMode: false,
+  setWifeMode: (v) => {
+    set({ wifeMode: v });
+    AsyncStorage.setItem('tpc_wife_mode', v ? '1' : '0').catch(() => {});
+  },
+  currency: 'USD',
+  setCurrency: (c) => {
+    set({ currency: c });
+    AsyncStorage.setItem('tpc_currency', c).catch(() => {});
+    // Fetch fresh rates whenever currency changes (no-op if already cached today)
+    get().fetchExchangeRates();
+  },
+
+  exchangeRates: {},
+  fetchExchangeRates: async () => {
+    const CACHE_KEY = 'tpc_exchange_rates';
+    const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+    try {
+      // Check cache first
+      const cached = await AsyncStorage.getItem(CACHE_KEY);
+      if (cached) {
+        const { rates, timestamp } = JSON.parse(cached) as {
+          rates: Record<string, number>;
+          timestamp: number;
+        };
+        if (Date.now() - timestamp < CACHE_TTL) {
+          set({ exchangeRates: rates });
+          return;
+        }
+      }
+
+      // Fetch fresh rates from Frankfurter (free, no key, ECB daily rates)
+      const response = await fetch(
+        'https://api.frankfurter.app/latest?from=USD&to=EUR,GBP,CAD,AUD,JPY',
+      );
+      if (!response.ok) return;
+      const json = await response.json() as { rates: Record<string, number> };
+      const rates = json.rates ?? {};
+
+      set({ exchangeRates: rates });
+      AsyncStorage.setItem(CACHE_KEY, JSON.stringify({ rates, timestamp: Date.now() })).catch(() => {});
+    } catch {
+      // Silently fail — USD fallback (rate = 1) is always safe
+    }
   },
 
   fetchPedals: async () => {
@@ -994,11 +1057,19 @@ export const useStore = create<Store>((set, get) => ({
 }));
 
 // Hydrate UI preferences + persisted state
-AsyncStorage.getItem('tpc_view_mode')
-  .then((mode) => {
-    if (mode === 'tile' || mode === 'text') {
-      useStore.setState({ viewMode: mode });
-    }
+AsyncStorage.multiGet(['tpc_view_mode', 'tpc_wife_mode', 'tpc_currency'])
+  .then((pairs) => {
+    const updates: {
+      viewMode?: 'tile' | 'text';
+      wifeMode?: boolean;
+      currency?: CurrencyCode;
+    } = {};
+    const [viewModeRaw, wifeModeRaw, currencyRaw] = pairs.map(p => p[1]);
+    if (viewModeRaw === 'tile' || viewModeRaw === 'text') updates.viewMode = viewModeRaw;
+    if (wifeModeRaw === '1') updates.wifeMode = true;
+    if (currencyRaw && CURRENCIES.some(c => c.code === currencyRaw))
+      updates.currency = currencyRaw as CurrencyCode;
+    if (Object.keys(updates).length) useStore.setState(updates);
   })
   .catch(() => {});
 
@@ -1007,3 +1078,6 @@ SecureStorageAdapter.getItem('tpc_last_custom_shop_pick')
     if (raw) useStore.setState({ lastCustomShopPick: JSON.parse(raw) });
   })
   .catch(() => {});
+
+// Pre-fetch exchange rates on startup (cached for 24h, no-op if USD)
+useStore.getState().fetchExchangeRates();

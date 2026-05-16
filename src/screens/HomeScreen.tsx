@@ -789,18 +789,6 @@ export default function HomeScreen() {
             )}
           </View>
 
-          {/* ── Quick Action: Add Pedal (secondary — primary is the AI card above) ── */}
-          <TouchableOpacity
-            activeOpacity={0.85}
-            onPress={() => {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-              navigation.navigate('Vault', { initialTab: 'owned', openAddModal: true });
-            }}
-            style={styles.addPedalBtn}
-          >
-            <Ionicons name="add-circle-outline" size={18} color={colors.teal} />
-            <Text style={styles.addPedalText}>Add a Pedal</Text>
-          </TouchableOpacity>
 
         </View>
       </ScrollView>
@@ -816,15 +804,15 @@ export default function HomeScreen() {
           <View style={styles.weeklyModalOverlay}>
             <TouchableOpacity style={styles.weeklyModalBackdrop} activeOpacity={1} onPress={() => setShowWeeklyDetail(false)} />
             <SwipeDismissSheet style={styles.weeklyModalSheet} onDismiss={() => setShowWeeklyDetail(false)}>
+              <TouchableOpacity onPress={() => setShowWeeklyDetail(false)} activeOpacity={0.7} style={styles.sheetCloseBtn} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
+                <Ionicons name="close" size={24} color={colors.textMuted} />
+              </TouchableOpacity>
               {/* Header */}
               <View style={styles.weeklyModalHeader}>
                 <View style={styles.weeklyModalTitleRow}>
                   <Ionicons name="sparkles" size={15} color={colors.gold} />
                   <Text style={styles.weeklyModalTitle}>This Week's Pick</Text>
                 </View>
-                <TouchableOpacity onPress={() => setShowWeeklyDetail(false)} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
-                  <Ionicons name="close" size={20} color={colors.textMuted} />
-                </TouchableOpacity>
               </View>
 
               {/* Pedal name */}
@@ -909,14 +897,14 @@ export default function HomeScreen() {
         <View style={styles.weeklyModalOverlay}>
           <TouchableOpacity style={styles.weeklyModalBackdrop} activeOpacity={1} onPress={() => setShowVaultSnapshot(false)} />
           <SwipeDismissSheet style={[styles.weeklyModalSheet, { maxHeight: '80%' }]} onDismiss={() => setShowVaultSnapshot(false)}>
+            <TouchableOpacity onPress={() => setShowVaultSnapshot(false)} activeOpacity={0.7} style={styles.sheetCloseBtn} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
+              <Ionicons name="close" size={24} color={colors.textMuted} />
+            </TouchableOpacity>
             <View style={styles.weeklyModalHeader}>
               <View style={styles.weeklyModalTitleRow}>
                 <Ionicons name="trending-up-outline" size={15} color={colors.teal} />
                 <Text style={styles.weeklyModalTitle}>Vault Snapshot</Text>
               </View>
-              <TouchableOpacity onPress={() => setShowVaultSnapshot(false)} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
-                <Ionicons name="close" size={20} color={colors.textMuted} />
-              </TouchableOpacity>
             </View>
 
             {/* Totals */}
@@ -1377,10 +1365,17 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     marginBottom: spacing.xs,
   },
+  sheetCloseBtn: {
+    position: 'absolute',
+    top: spacing.md,
+    right: spacing.md,
+    zIndex: 10,
+    padding: spacing.xs,
+  },
   weeklyModalHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    paddingRight: spacing.xl, // leave room for absolute X
   },
   weeklyModalTitleRow: {
     flexDirection: 'row',

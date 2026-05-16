@@ -14,7 +14,9 @@ import {
   Modal,
   ActivityIndicator,
   Alert,
+  ActionSheetIOS,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -22,7 +24,7 @@ import { useNavigation } from '@react-navigation/native'; // kept for future dee
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, spacing, radius } from '../theme';
 import { useStore } from '../hooks/useStore';
-import { askClaude, Message } from '../lib/anthropic';
+import { askClaude, Message, ContentBlock } from '../lib/anthropic';
 import { buildSystemPrompt, STARTER_PROMPTS } from '../lib/systemPrompt';
 import { hasBetaFullAccess } from '../lib/subscription';
 import { useMessageGate } from '../hooks/useMessageGate';
@@ -43,14 +45,22 @@ import { AIStackParamList, RootStackParamList } from '../types/navigation';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { SwipeDismissSheet } from '../components/SwipeDismissSheet';
 import { classifyError } from '../lib/networkError';
+import * as Clipboard from 'expo-clipboard';
 
 type ChatMessage = Message & {
   id: string;
   isStreaming?: boolean;
+  /** Local image URI for display — only set on user messages that included an image */
+  imageUri?: string;
 };
 
 const TEAL_GRADIENT: [string, string] = [colors.teal, colors.tealDark];
 const SURFACE_GRADIENT: [string, string] = ['#FFFFFF', '#F7F4F0'];
+
+/** Extract text from a message content that may be a string or a ContentBlock array */
+const getMessageText = (content: string | ContentBlock[]): string =>
+  typeof content === 'string' ? content :
+  (content as ContentBlock[]).find(b => b.type === 'text')?.text ?? '';
 
 export default function AdvisorScreen() {
   const insets = useSafeAreaInsets();
@@ -70,6 +80,7 @@ export default function AdvisorScreen() {
   const [queuedCount, setQueuedCount] = useState(0);
   const [showWeeklyDetail, setShowWeeklyDetail] = useState(false);
   const [weeklyWishlistState, setWeeklyWishlistState] = useState<'idle' | 'loading' | 'added' | 'exists'>('idle');
+  const [pendingImage, setPendingImage] = useState<{ uri: string; base64: string } | null>(null);
 
   // ── Conversation persistence (Pro only) ────────────────────────────────────
   const conversationIdRef = useRef<string | null>(resumeConversationId ?? null);
@@ -196,6 +207,46 @@ export default function AdvisorScreen() {
     }, 80);
   }, []);
 
+  const pickImage = useCallback(() => {
+    ActionSheetIOS.showActionSheetWithOptions(
+      { options: ['Cancel', 'Take Photo', 'Choose from Library'], cancelButtonIndex: 0 },
+      async (buttonIndex) => {
+        if (buttonIndex === 0) return;
+        const useCamera = buttonIndex === 1;
+        if (useCamera) {
+          const perm = await ImagePicker.requestCameraPermissionsAsync();
+          if (!perm.granted) {
+            Alert.alert('Permission needed', 'Please allow camera access in Settings.');
+            return;
+          }
+        } else {
+          const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+          if (!perm.granted) {
+            Alert.alert('Permission needed', 'Please allow photo library access in Settings.');
+            return;
+          }
+        }
+        // Ask the picker for base64 directly — no ImageManipulator or FileSystem needed.
+        const result = useCamera
+          ? await ImagePicker.launchCameraAsync({ allowsEditing: true, quality: 0.7, base64: true, exif: false })
+          : await ImagePicker.launchImageLibraryAsync({
+              mediaTypes: ImagePicker.MediaTypeOptions.Images,
+              allowsEditing: false,
+              quality: 0.7,
+              base64: true,
+              exif: false,
+            });
+        if (result.canceled || !result.assets?.[0]) return;
+        const asset = result.assets[0];
+        if (!asset.base64) {
+          Alert.alert('Could not read image', 'Please try again.');
+          return;
+        }
+        setPendingImage({ uri: asset.uri, base64: asset.base64 });
+      }
+    );
+  }, []);
+
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim()) return;
 
@@ -213,11 +264,20 @@ export default function AdvisorScreen() {
     // Immediately show the user's bubble and disable the send button.
     // Doing this before the async gate check gives instant visual feedback,
     // preventing impatient re-taps while waiting for the network round-trip.
+    const imageSnapshot = pendingImage;
+    const messageContent: string | ContentBlock[] = imageSnapshot
+      ? [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageSnapshot.base64 } },
+          { type: 'text', text: text.trim() || 'What is this?' },
+        ]
+      : text.trim();
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
       role: 'user',
-      content: text.trim(),
+      content: messageContent,
+      imageUri: imageSnapshot?.uri,
     };
+    setPendingImage(null);
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setIsThinking(true);
@@ -248,10 +308,19 @@ export default function AdvisorScreen() {
     // ────────────────────────────────────────────────────────────────────────
 
     // Build history from the ref so queue-drain calls always get up-to-date context.
+    // Keep image content blocks intact so Claude sees the image; only drop base64
+    // from older history messages to keep payload size manageable.
     const MAX_HISTORY = 20;
-    const history: Message[] = [...messagesRef.current, userMessage]
-      .slice(-MAX_HISTORY)
-      .map(m => ({ role: m.role, content: m.content }));
+    const allHistory = [...messagesRef.current, userMessage].slice(-MAX_HISTORY);
+    const history: Message[] = allHistory.map((m, i) => {
+      const isLatest = i === allHistory.length - 1;
+      // Strip image blocks from older messages (keep only text) to limit payload size
+      if (!isLatest && Array.isArray(m.content)) {
+        const text = (m.content as ContentBlock[]).find(b => b.type === 'text')?.text ?? '';
+        return { role: m.role, content: text };
+      }
+      return { role: m.role, content: m.content };
+    });
 
     const assistantId = (Date.now() + 1).toString();
     let accumulated = '';
@@ -305,8 +374,8 @@ export default function AdvisorScreen() {
         if (isPro && session?.user?.id) {
           setMessages(prev => {
             const snapshot: ConversationMessage[] = prev
-              .filter(m => !m.isStreaming || m.content.trim())
-              .map(m => ({ role: m.role, content: m.content }));
+              .filter(m => !m.isStreaming || getMessageText(m.content).trim())
+              .map(m => ({ role: m.role, content: getMessageText(m.content) }));
             if (!conversationIdRef.current) {
               const rawTitle = text.trim().slice(0, 60);
               const title = rawTitle.charAt(0).toUpperCase() + rawTitle.slice(1);
@@ -350,7 +419,7 @@ export default function AdvisorScreen() {
 
   const isEmpty = messages.length === 0;
   const hasStreamingAssistantWithText = messages.some(
-    (m) => m.role === 'assistant' && Boolean(m.isStreaming) && m.content.trim().length > 0
+    (m) => m.role === 'assistant' && Boolean(m.isStreaming) && getMessageText(m.content).trim().length > 0
   );
 
   return (
@@ -468,16 +537,17 @@ export default function AdvisorScreen() {
           <>
             {messages.map((message, idx) => {
               const isLastMsg = idx === messages.length - 1;
-              const isLastCompleted =
-                isLastMsg &&
+              const isCompletedAssistant =
                 message.role === 'assistant' &&
                 !message.isStreaming &&
-                message.content.trim().length > 0;
+                getMessageText(message.content).trim().length > 0;
+              const isLastCompleted = isLastMsg && isCompletedAssistant;
               return (
                 <MessageBubble
                   key={message.id}
                   message={message}
                   showShare={isLastCompleted}
+                  showCopy={isCompletedAssistant}
                 />
               );
             })}
@@ -496,7 +566,28 @@ export default function AdvisorScreen() {
             </Text>
           </View>
         )}
+        {/* Pending image preview */}
+        {pendingImage && (
+          <View style={styles.pendingImageRow}>
+            <Image source={{ uri: pendingImage.uri }} style={styles.pendingImageThumb} resizeMode="cover" />
+            <TouchableOpacity
+              style={styles.pendingImageRemove}
+              onPress={() => setPendingImage(null)}
+              hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+            >
+              <Ionicons name="close-circle" size={20} color={colors.textMuted} />
+            </TouchableOpacity>
+          </View>
+        )}
         <View style={styles.inputRow}>
+          {/* Camera button */}
+          <TouchableOpacity
+            onPress={pickImage}
+            activeOpacity={0.7}
+            style={styles.cameraButton}
+          >
+            <Ionicons name="camera-outline" size={22} color={pendingImage ? colors.teal : colors.textMuted} />
+          </TouchableOpacity>
           <TextInput
             ref={inputRef}
             style={styles.input}
@@ -512,12 +603,12 @@ export default function AdvisorScreen() {
           />
           <TouchableOpacity
             onPress={() => sendMessage(input)}
-            disabled={!input.trim()}
+            disabled={!input.trim() && !pendingImage}
             activeOpacity={0.8}
           >
             <LinearGradient
               colors={
-                !input.trim()
+                (!input.trim() && !pendingImage)
                   ? ['#E2DDD7', '#E2DDD7']
                   : isThinking
                   ? [colors.gold, colors.goldDark]
@@ -525,7 +616,7 @@ export default function AdvisorScreen() {
               }
               style={styles.sendButton}
             >
-              {isThinking && input.trim()
+              {isThinking && (input.trim() || pendingImage)
                 ? <Ionicons name="time-outline" size={20} color="#fff" />
                 : <Text style={styles.sendButtonIcon}>↑</Text>
               }
@@ -632,19 +723,29 @@ export default function AdvisorScreen() {
 function MessageBubble({
   message,
   showShare = false,
+  showCopy = false,
 }: {
   message: ChatMessage;
   showShare?: boolean;
+  showCopy?: boolean;
 }) {
+  const [copied, setCopied] = useState(false);
   const isUser = message.role === 'user';
   const isEmptyStreamingAssistant =
     !isUser &&
     Boolean(message.isStreaming) &&
-    !message.content.trim();
+    !getMessageText(message.content).trim();
 
   if (isEmptyStreamingAssistant) {
     return null;
   }
+
+  const handleCopy = () => {
+    Haptics.selectionAsync();
+    Clipboard.setStringAsync(getMessageText(message.content));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   return (
     <View style={[styles.bubbleRow, isUser && styles.bubbleRowUser]}>
@@ -662,23 +763,60 @@ function MessageBubble({
           ]}
         >
           {isUser ? (
-            <Text style={styles.bubbleTextUser}>{message.content}</Text>
+            <>
+              {message.imageUri && (
+                <Image
+                  source={{ uri: message.imageUri }}
+                  style={styles.bubbleImage}
+                  resizeMode="cover"
+                />
+              )}
+              {(() => {
+                const txt = typeof message.content === 'string'
+                  ? message.content
+                  : (message.content as ContentBlock[]).find(b => b.type === 'text')?.text ?? '';
+                return txt ? <Text style={styles.bubbleTextUser}>{txt}</Text> : null;
+              })()}
+            </>
           ) : (
-            <FormattedText text={message.content} isStreaming={message.isStreaming} />
+            <FormattedText
+              text={typeof message.content === 'string' ? message.content : ''}
+              isStreaming={message.isStreaming}
+            />
           )}
         </View>
-        {showShare && (
-          <TouchableOpacity
-            style={styles.bubbleShareBtn}
-            onPress={() => {
-              Haptics.selectionAsync();
-              shareAdvisorResponse(message.content);
-            }}
-            activeOpacity={0.7}
-          >
-            <Ionicons name="share-outline" size={13} color={colors.textMuted} />
-            <Text style={styles.bubbleShareText}>Share this</Text>
-          </TouchableOpacity>
+        {(showShare || showCopy) && (
+          <View style={styles.bubbleActionsRow}>
+            {showCopy && (
+              <TouchableOpacity
+                style={styles.bubbleShareBtn}
+                onPress={handleCopy}
+                activeOpacity={0.7}
+              >
+                <Ionicons
+                  name={copied ? 'checkmark' : 'copy-outline'}
+                  size={13}
+                  color={copied ? colors.teal : colors.textMuted}
+                />
+                <Text style={[styles.bubbleShareText, copied && styles.bubbleCopiedText]}>
+                  {copied ? 'Copied' : 'Copy'}
+                </Text>
+              </TouchableOpacity>
+            )}
+            {showShare && (
+              <TouchableOpacity
+                style={styles.bubbleShareBtn}
+                onPress={() => {
+                  Haptics.selectionAsync();
+                  shareAdvisorResponse(getMessageText(message.content));
+                }}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="share-outline" size={13} color={colors.textMuted} />
+                <Text style={styles.bubbleShareText}>Share</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         )}
       </View>
     </View>
@@ -1076,6 +1214,16 @@ const styles = StyleSheet.create({
     fontFamily: typography.body,
     color: colors.textMuted,
   },
+  bubbleActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingLeft: spacing.xs,
+    paddingVertical: 2,
+  },
+  bubbleCopiedText: {
+    color: colors.teal,
+  },
   bubbleRowUser: {
     flexDirection: 'row-reverse',
   },
@@ -1182,6 +1330,35 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     paddingTop: spacing.sm,
     paddingHorizontal: spacing.base,
+  },
+  pendingImageRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: spacing.sm,
+  },
+  pendingImageThumb: {
+    width: 72,
+    height: 72,
+    borderRadius: radius.md,
+    backgroundColor: colors.border,
+  },
+  pendingImageRemove: {
+    marginLeft: -10,
+    marginTop: -6,
+  },
+  cameraButton: {
+    width: 36,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 2,
+  },
+  bubbleImage: {
+    width: '100%',
+    height: 180,
+    borderRadius: radius.md,
+    marginBottom: spacing.xs,
+    backgroundColor: colors.border,
   },
   queueBanner: {
     flexDirection: 'row',

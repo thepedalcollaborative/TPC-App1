@@ -18,6 +18,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Linking from 'expo-linking';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { supabase } from './src/lib/supabase';
 import { useStore } from './src/hooks/useStore';
 import { configureRevenueCat, syncEntitlement, hasBetaFullAccess } from './src/lib/subscription';
@@ -46,6 +48,8 @@ import BoardsScreen from './src/screens/BoardsScreen';
 import BoardDetailScreen from './src/screens/BoardDetailScreen';
 import AIHubScreen from './src/screens/AIHubScreen';
 import VideosScreen from './src/screens/VideosScreen';
+import GearHistoryScreen from './src/screens/GearHistoryScreen';
+import ChatHistoryScreen from './src/screens/ChatHistoryScreen';
 
 // Defensive wrapper — prevents crash if native module isn't linked in Expo Go
 try { SplashScreen.preventAutoHideAsync(); } catch { /* no-op */ }
@@ -296,6 +300,45 @@ export default function App() {
     Inter_600SemiBold,
   });
 
+  // ── Deep link handler (email verification + OAuth fallback) ─────────────────
+  // When the user taps the confirmation email link, iOS opens the app at
+  // tpc://auth-callback with tokens in the hash fragment or a PKCE code in
+  // the query string. We process whichever we get.
+  useEffect(() => {
+    const handleUrl = async (url: string) => {
+      if (!url.startsWith('tpc://auth-callback')) return;
+
+      // Email verification → hash fragment: #access_token=...&refresh_token=...
+      const hash = url.includes('#') ? url.split('#')[1] : '';
+      const hashParams = new URLSearchParams(hash);
+      const accessToken = hashParams.get('access_token');
+      const refreshToken = hashParams.get('refresh_token');
+      if (accessToken && refreshToken) {
+        const { data } = await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+        if (data.session) setSession(data.session);
+        return;
+      }
+
+      // PKCE OAuth → query param: ?code=...
+      const query = url.includes('?') ? url.split('?')[1].split('#')[0] : '';
+      const code = new URLSearchParams(query).get('code');
+      if (code) {
+        const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (!error) {
+          const { data: sd } = await supabase.auth.getSession();
+          if (sd.session) setSession(sd.session);
+        }
+      }
+    };
+
+    // Cold start — app opened via deep link while it was terminated
+    Linking.getInitialURL().then(url => { if (url) handleUrl(url); });
+
+    // Warm — app already running when link is tapped
+    const sub = Linking.addEventListener('url', ({ url }) => handleUrl(url));
+    return () => sub.remove();
+  }, []);
+
   // First-run welcome onboarding — shown only once, before login
   useEffect(() => {
     AsyncStorage.getItem('tpc_welcome_shown').then(val => {
@@ -314,9 +357,12 @@ export default function App() {
       if (error) {
         const msg = String(error.message ?? '');
         if (msg.toLowerCase().includes('refresh token')) {
-          // Avoid hard sign-out on transient refresh-token issues.
-          // We'll rely on auth state events / next successful sign-in.
-          if (__DEV__) console.warn('[Auth] getSession refresh token warning:', msg);
+          // The stored refresh token is invalid or not found on the server —
+          // this is not transient. Clear local session so the user sees the
+          // login screen cleanly instead of being stuck in a broken auth state.
+          if (__DEV__) console.warn('[Auth] Invalid refresh token — clearing local session');
+          await supabase.auth.signOut({ scope: 'local' });
+          setSession(null);
           setInitialized(true);
           return;
         }
@@ -403,13 +449,9 @@ export default function App() {
     if (!session?.user?.id) return;
     const userId = session.user.id;
     configureRevenueCat(userId);
-    // Sync RevenueCat entitlement → Supabase on every sign-in (non-blocking)
-    syncEntitlement(userId).catch(() => {});
-    // Beta builds grant full access via app.json flag — mirror that into the DB so
-    // server-side edge functions (which check is_premium directly) also accept the user.
-    if (hasBetaFullAccess()) {
-      supabase.from('user_profiles').update({ is_premium: true }).eq('id', userId).then(undefined, () => {});
-    }
+    // Client sync reads RevenueCat state only. Premium writes happen through
+    // trusted server-side paths such as RevenueCat webhooks and Patreon connect.
+    syncEntitlement().catch(() => {});
     fetchProfile();
     // Request notification permissions and schedule recurring reminders on sign-in
     requestNotificationPermissions().then(granted => {
@@ -491,11 +533,22 @@ export default function App() {
           component={AdminScreen}
           options={{ animation: 'slide_from_right' }}
         />
+        <Stack.Screen
+          name="GearHistory"
+          component={GearHistoryScreen}
+          options={{ animation: 'slide_from_right', gestureEnabled: true }}
+        />
+        <Stack.Screen
+          name="ChatHistory"
+          component={ChatHistoryScreen}
+          options={{ animation: 'slide_from_right', gestureEnabled: true }}
+        />
       </Stack.Navigator>
     </NavigationContainer>
   );
 
   return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
     <SafeAreaProvider>
       <StatusBar style="light" />
       <View style={styles.appRoot}>
@@ -592,6 +645,7 @@ export default function App() {
         )}
       </View>
     </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 

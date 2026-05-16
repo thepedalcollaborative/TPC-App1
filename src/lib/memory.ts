@@ -7,7 +7,7 @@
 // enhancement, never a hard dependency.
 
 import Constants from 'expo-constants';
-import { supabase, EDGE_AUTH_HEADER } from './supabase';
+import { supabase, getEdgeAuthHeaders } from './supabase';
 
 const extra: Record<string, unknown> =
   (Constants.expoConfig?.extra as Record<string, unknown>) ??
@@ -73,9 +73,10 @@ Advisor: ${exchange.assistantMessage.slice(0, 800)}
 
 Return ONLY the updated memory text. No preamble, no explanation.`;
 
+    const authHeaders = await getEdgeAuthHeaders();
     const response = await fetch(ADVISOR_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...EDGE_AUTH_HEADER },
+      headers: { 'Content-Type': 'application/json', ...authHeaders },
       body: JSON.stringify({
         messages: [{ role: 'user', content: prompt }],
         systemPrompt: 'You are a concise memory summariser. Return only the updated memory text.',

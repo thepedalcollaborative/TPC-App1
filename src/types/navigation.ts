@@ -2,11 +2,13 @@ export type RootStackParamList = {
   Main: undefined;
   Admin: undefined;
   Profile: undefined;
+  GearHistory: undefined;
+  ChatHistory: undefined;
 };
 
 export type TabParamList = {
   Home: undefined;
-  Vault: { initialTab?: 'owned' | 'wishlist' | 'retired'; openPedalId?: string; openAddModal?: boolean } | undefined;
+  Vault: { initialTab?: 'owned' | 'wishlist' | 'listed'; openPedalId?: string; openAddModal?: boolean; triggerScan?: 'camera' | 'library' } | undefined;
   Videos: undefined;
   Boards: undefined;
   'TPC.ai': undefined;
@@ -14,7 +16,7 @@ export type TabParamList = {
 
 export type HomeStackParamList = {
   HomeMain: undefined;
-  Finder: undefined;
+  Finder: { startMode?: 'expert' } | undefined;
 };
 
 export type BoardsStackParamList = {
@@ -24,6 +26,6 @@ export type BoardsStackParamList = {
 
 export type AIStackParamList = {
   AIHub: undefined;
-  Advisor: undefined;
-  Finder: undefined;
+  Advisor: { conversationId?: string } | undefined;
+  Finder: { startMode?: 'expert' } | undefined;
 };

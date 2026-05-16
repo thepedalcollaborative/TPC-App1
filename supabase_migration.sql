@@ -476,3 +476,41 @@ union all
 select id, 'Black', '#1A1A1A', true, null, null from public.pedals where brand = 'Meris' and model = 'Polymoon'
 
 on conflict do nothing;
+
+-- ─── Price drop alerts & push tokens ──────────────────────────────────────────
+-- Run these in the Supabase SQL editor
+
+-- 1. Target price on wishlist items (user sets their max/desired price)
+ALTER TABLE user_pedals
+  ADD COLUMN IF NOT EXISTS target_price NUMERIC,
+  ADD COLUMN IF NOT EXISTS price_alert_sent_at TIMESTAMPTZ;
+
+-- 2. Expo push token on user profiles (for server-side push notifications)
+ALTER TABLE user_profiles
+  ADD COLUMN IF NOT EXISTS push_token TEXT;
+
+-- 3. Index for the price-alerts Edge Function query (perf)
+CREATE INDEX IF NOT EXISTS idx_user_pedals_wishlist_target
+  ON user_pedals (user_id, target_price)
+  WHERE status = 'wishlist' AND target_price IS NOT NULL;
+
+-- ─── Deploy price-alerts Edge Function ────────────────────────────────────────
+-- After running the ALTER TABLE statements above, deploy the function:
+--
+--   cd /path/to/TPC-App1
+--   supabase functions deploy price-alerts --no-verify-jwt
+--
+-- Then set up the cron schedule in Supabase Dashboard:
+--   Edge Functions → price-alerts → Schedules → Add Schedule
+--   Cron: 0 */6 * * *   (every 6 hours)
+--
+-- Or enable pg_net + pg_cron in Supabase and run:
+--   select cron.schedule(
+--     'price-alerts-job',
+--     '0 */6 * * *',
+--     $$ select net.http_post(
+--          url := 'https://<project-ref>.supabase.co/functions/v1/price-alerts',
+--          headers := '{"Authorization":"Bearer <service-role-key>","Content-Type":"application/json"}'::jsonb,
+--          body := '{}'::jsonb
+--        ); $$
+--   );

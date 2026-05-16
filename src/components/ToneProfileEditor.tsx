@@ -120,8 +120,6 @@ export function ToneProfileEditor({ profile, onComplete, onDismiss }: Props) {
   const insets = useSafeAreaInsets();
   const [localProfile, setLocalProfile] = useState<FullExpertProfile>(profile);
   const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
-  const [isDirty, setIsDirty] = useState(false);
-
   // Local input state for edit mode
   const [localMultiSelect, setLocalMultiSelect] = useState<string[]>([]);
   const [localText, setLocalText] = useState('');
@@ -156,25 +154,21 @@ export function ToneProfileEditor({ profile, onComplete, onDismiss }: Props) {
     setEditingStepIndex(stepIndex);
   };
 
-  // ── Commit a single step's answer back to localProfile ───────────────────
+  // ── Commit a single step's answer — saves to Supabase immediately ────────
 
   const commitStep = (updates: Partial<FullExpertProfile>) => {
-    setLocalProfile(prev => ({ ...prev, ...updates }));
-    setIsDirty(true);
-    setEditingStepIndex(null);
-  };
-
-  // ── Save all changes ──────────────────────────────────────────────────────
-
-  const handleSaveAll = () => {
     const now = new Date();
     const refreshDate = new Date(now);
     refreshDate.setMonth(refreshDate.getMonth() + 6);
-    onComplete({
+    const updated: FullExpertProfile = {
       ...localProfile,
+      ...updates,
       profile_updated_at: now.toISOString(),
       profile_refresh_due_at: refreshDate.toISOString(),
-    });
+    };
+    setLocalProfile(updated);
+    setEditingStepIndex(null);
+    onComplete(updated); // persists to Supabase in the background
   };
 
   // ─── Edit step renderers ──────────────────────────────────────────────────
@@ -464,7 +458,7 @@ export function ToneProfileEditor({ profile, onComplete, onDismiss }: Props) {
 
       <ScrollView
         style={styles.scroll}
-        contentContainerStyle={[styles.scrollContent, { paddingBottom: isDirty ? 120 : 48 }]}
+        contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
         <Text style={styles.summaryNote}>
@@ -501,14 +495,6 @@ export function ToneProfileEditor({ profile, onComplete, onDismiss }: Props) {
         </View>
       </ScrollView>
 
-      {/* Save bar — only shown when changes exist */}
-      {isDirty && (
-        <View style={[styles.saveBar, { paddingBottom: insets.bottom + 8 }]}>
-          <TouchableOpacity style={styles.saveBtn} onPress={handleSaveAll} activeOpacity={0.85}>
-            <Text style={styles.saveBtnText}>Save Changes</Text>
-          </TouchableOpacity>
-        </View>
-      )}
     </View>
   );
 }
@@ -776,27 +762,4 @@ const styles = StyleSheet.create({
     marginLeft: spacing.base,
   },
 
-  // Save bar
-  saveBar: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: colors.background,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-    paddingHorizontal: spacing.base,
-    paddingTop: spacing.base,
-  },
-  saveBtn: {
-    backgroundColor: colors.teal,
-    borderRadius: radius.xl,
-    paddingVertical: spacing.base,
-    alignItems: 'center',
-  },
-  saveBtnText: {
-    fontSize: typography.sizes.base,
-    fontFamily: typography.bodySemiBold,
-    color: '#fff',
-  },
 });

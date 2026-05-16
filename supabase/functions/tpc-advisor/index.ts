@@ -35,16 +35,80 @@ const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 
 // Whitelist prevents clients from requesting arbitrary models
 const ALLOWED_MODELS = new Set([
-  'claude-haiku-4-5-20251001',
-  'claude-sonnet-4-20250514',
+  'claude-haiku-4-5',
+  'claude-sonnet-4-5',
 ]);
-const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
+const DEFAULT_MODEL = 'claude-haiku-4-5';
 
 // Built-in Anthropic web search tool (server-side — Anthropic executes the search)
 const WEB_SEARCH_TOOL = {
   type: 'web_search_20250305',
   name: 'web_search',
 };
+
+// Custom tool: server-side URL fetch so Claude can read pages the user pastes
+const FETCH_URL_TOOL = {
+  name: 'fetch_url',
+  description: 'Fetches and returns the text content of a public web page. Use this whenever the user shares or mentions a URL and wants you to read, summarize, or discuss its contents. Do NOT use this for general searches — use web_search for that.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      url: {
+        type: 'string',
+        description: 'The full URL to fetch (must be a public https:// address).',
+      },
+    },
+    required: ['url'],
+  },
+};
+
+// SSRF protection — block private/loopback/link-local addresses
+function isSafeUrl(urlStr: string): boolean {
+  let url: URL;
+  try { url = new URL(urlStr); } catch { return false; }
+  if (url.protocol !== 'https:') return false;
+  const h = url.hostname.toLowerCase();
+  return ![
+    /^localhost$/i, /^127\./, /^10\./,
+    /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
+    /^169\.254\./, /^0\.0\.0\.0$/, /\.local$/i,
+    /\.internal$/i, /^::1$/,
+  ].some(r => r.test(h));
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+    .replace(/\s{2,}/g, ' ').trim();
+}
+
+async function fetchUrlContent(url: string): Promise<string> {
+  if (!isSafeUrl(url)) return 'Error: URL must be a public https:// address.';
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'TPC-Advisor/1.0', Accept: 'text/html,text/plain;q=0.9' },
+    });
+    clearTimeout(timer);
+    if (!res.ok) return `Error: Page returned HTTP ${res.status}.`;
+    const ct = res.headers.get('content-type') ?? '';
+    if (!ct.includes('html') && !ct.includes('text') && !ct.includes('json')) {
+      return 'Error: URL does not point to readable text content.';
+    }
+    const raw = await res.text();
+    const text = ct.includes('html') ? stripHtml(raw.slice(0, 200_000)) : raw.slice(0, 200_000);
+    return text.slice(0, 5000) || 'Error: Page appears to be empty.';
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') return 'Error: Request timed out after 8s.';
+    return `Error: Could not fetch URL — ${(e as Error).message}`;
+  }
+}
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -177,9 +241,10 @@ serve(async (req) => {
       ? requestedModel
       : DEFAULT_MODEL;
 
-    // Merge client-supplied tools with web search when requested
+    // Merge client-supplied tools with custom and built-in tools
     const allTools = [
       ...(clientTools ?? []),
+      FETCH_URL_TOOL,
       ...(allowWebSearch ? [WEB_SEARCH_TOOL] : []),
     ];
     const hasTools = allTools.length > 0;
@@ -271,12 +336,17 @@ serve(async (req) => {
           { role: 'assistant', content: finalContent },
         ];
 
-        // Build tool results (for server-side tools, results are handled by Anthropic;
-        // we shouldn't normally reach here for web_search_20250305)
-        const toolResults = toolUseBlocks.map(block => ({
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: 'Tool execution completed.',
+        // Execute custom tools; for built-in server-side tools (web_search_20250305),
+        // Anthropic handles execution internally so we shouldn't normally reach here.
+        const toolResults = await Promise.all(toolUseBlocks.map(async block => {
+          let content: string;
+          if (block.name === 'fetch_url') {
+            const { url } = block.input as { url?: string };
+            content = url ? await fetchUrlContent(url) : 'Error: No URL provided.';
+          } else {
+            content = 'Tool execution completed.';
+          }
+          return { type: 'tool_result', tool_use_id: block.id, content };
         }));
 
         currentMessages = [

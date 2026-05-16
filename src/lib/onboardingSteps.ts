@@ -167,6 +167,7 @@ export const STEPS: StepConfig[] = [
       { label: 'Ambient / experimental', value: 'ambient' },
       { label: 'Country / Americana', value: 'country' },
       { label: 'Funk / soul / R&B', value: 'funk' },
+      { label: 'Reggae / dub', value: 'reggae' },
       { label: 'Pop / singer-songwriter', value: 'pop' },
       { label: 'Praise & Worship', value: 'praise_worship' },
       { label: 'Electronic / noise', value: 'electronic' },

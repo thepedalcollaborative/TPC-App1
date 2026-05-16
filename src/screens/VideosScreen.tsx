@@ -18,6 +18,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, spacing, radius, gradients } from '../theme';
 import { supabase, invokeEdgeFunction } from '../lib/supabase';
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const CHANNEL_ID   = 'UCatp9V-Jx2KayYer0y052kw';
+const CHANNEL_URL  = `https://www.youtube.com/channel/${CHANNEL_ID}?sub_confirmation=1`;
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface YoutubeVideo {
@@ -45,6 +50,43 @@ function formatDate(iso: string): string {
 
 function openVideo(id: string) {
   Linking.openURL(`https://www.youtube.com/watch?v=${id}`).catch(() => {});
+}
+
+// ─── Featured Hero Card ────────────────────────────────────────────────────────
+
+function FeaturedCard({ video }: { video: YoutubeVideo }) {
+  return (
+    <TouchableOpacity
+      style={styles.featuredCard}
+      activeOpacity={0.8}
+      onPress={() => openVideo(video.id)}
+    >
+      <View style={styles.featuredThumbWrapper}>
+        {video.thumbnail ? (
+          <Image source={{ uri: video.thumbnail }} style={styles.featuredThumb} resizeMode="cover" />
+        ) : (
+          <View style={[styles.featuredThumb, styles.thumbnailPlaceholder]}>
+            <Ionicons name="play-circle" size={48} color={colors.textMuted} />
+          </View>
+        )}
+        <LinearGradient
+          colors={['transparent', 'rgba(0,0,0,0.7)']}
+          style={styles.featuredGradient}
+        />
+        <View style={styles.featuredLabel}>
+          <Ionicons name="logo-youtube" size={14} color="#FF0000" />
+          <Text style={styles.featuredLabelText}>THIS WEEK ON TPC</Text>
+        </View>
+        <View style={styles.featuredPlayBtn}>
+          <Ionicons name="play" size={20} color="#fff" />
+        </View>
+      </View>
+      <View style={styles.featuredBody}>
+        <Text style={styles.featuredTitle} numberOfLines={2}>{video.title}</Text>
+        <Text style={styles.featuredDate}>{formatDate(video.publishedAt)}</Text>
+      </View>
+    </TouchableOpacity>
+  );
 }
 
 // ─── VideoCard ────────────────────────────────────────────────────────────────
@@ -187,11 +229,45 @@ export default function VideosScreen() {
     setIsLoadingMore(false);
   }, [nextPageToken, isLoadingMore, fetchVideos]);
 
+  // ── Derived: featured vs rest ──────────────────────────────────────────────
+
+  const featuredVideo  = !query && videos.length > 0 ? videos[0] : null;
+  const listVideos     = !query && videos.length > 0 ? videos.slice(1) : videos;
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const renderItem = useCallback(({ item }: { item: YoutubeVideo }) => (
     <VideoCard video={item} />
   ), []);
+
+  const renderHeader = () => {
+    if (isLoading || !featuredVideo) return null;
+    return (
+      <View style={styles.listHeader}>
+        <FeaturedCard video={featuredVideo} />
+        {/* Subscribe CTA */}
+        <TouchableOpacity
+          style={styles.subscribeBanner}
+          activeOpacity={0.8}
+          onPress={() => Linking.openURL(CHANNEL_URL).catch(() => {})}
+        >
+          <View style={styles.subscribeBannerLeft}>
+            <Ionicons name="logo-youtube" size={20} color="#FF0000" />
+            <View>
+              <Text style={styles.subscribeBannerTitle}>The Pedal Collaborative</Text>
+              <Text style={styles.subscribeBannerSub}>New videos every week</Text>
+            </View>
+          </View>
+          <View style={styles.subscribeBtn}>
+            <Text style={styles.subscribeBtnText}>Subscribe</Text>
+          </View>
+        </TouchableOpacity>
+        {listVideos.length > 0 && (
+          <Text style={styles.moreEpisodesLabel}>More Episodes</Text>
+        )}
+      </View>
+    );
+  };
 
   const renderEmpty = () => {
     if (isLoading) return null;
@@ -274,14 +350,15 @@ export default function VideosScreen() {
         </View>
       ) : (
         <FlatList
-          data={videos}
+          data={listVideos}
           keyExtractor={item => item.id}
           renderItem={renderItem}
+          ListHeaderComponent={renderHeader}
           contentContainerStyle={[
             styles.listContent,
-            videos.length === 0 && styles.listContentEmpty,
+            listVideos.length === 0 && !featuredVideo && styles.listContentEmpty,
           ]}
-          ListEmptyComponent={renderEmpty}
+          ListEmptyComponent={!featuredVideo ? renderEmpty : null}
           ListFooterComponent={renderFooter}
           onEndReached={handleLoadMore}
           onEndReachedThreshold={0.4}
@@ -301,6 +378,7 @@ export default function VideosScreen() {
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
+const FEATURED_HEIGHT = 220;
 const THUMB_HEIGHT = 180;
 
 const styles = StyleSheet.create({
@@ -359,7 +437,6 @@ const styles = StyleSheet.create({
     fontFamily: typography.body,
     fontSize: typography.sizes.base,
     color: colors.textPrimary,
-    ...Platform.select({ web: { outlineStyle: 'none' } }),
   },
 
   // Loading
@@ -382,6 +459,126 @@ const styles = StyleSheet.create({
   },
   listContentEmpty: {
     flex: 1,
+  },
+  listHeader: {
+    gap: spacing.md,
+    marginBottom: spacing.md,
+  },
+
+  // Featured card
+  featuredCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: 'hidden',
+  },
+  featuredThumbWrapper: {
+    position: 'relative',
+  },
+  featuredThumb: {
+    width: '100%',
+    height: FEATURED_HEIGHT,
+    backgroundColor: colors.surfaceHigh,
+  },
+  featuredGradient: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: FEATURED_HEIGHT * 0.6,
+  },
+  featuredLabel: {
+    position: 'absolute',
+    top: spacing.sm,
+    left: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+  },
+  featuredLabelText: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: typography.sizes.xs,
+    color: '#fff',
+    letterSpacing: 0.6,
+  },
+  featuredPlayBtn: {
+    position: 'absolute',
+    bottom: spacing.md,
+    right: spacing.md,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  featuredBody: {
+    padding: spacing.md,
+    gap: 4,
+  },
+  featuredTitle: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: typography.sizes.md,
+    color: colors.textPrimary,
+    lineHeight: 22,
+  },
+  featuredDate: {
+    fontFamily: typography.body,
+    fontSize: typography.sizes.xs,
+    color: colors.textMuted,
+  },
+
+  // Subscribe banner
+  subscribeBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+  },
+  subscribeBannerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  subscribeBannerTitle: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: typography.sizes.sm,
+    color: colors.textPrimary,
+  },
+  subscribeBannerSub: {
+    fontFamily: typography.body,
+    fontSize: typography.sizes.xs,
+    color: colors.textMuted,
+    marginTop: 1,
+  },
+  subscribeBtn: {
+    backgroundColor: '#FF0000',
+    borderRadius: radius.full,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+  },
+  subscribeBtnText: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: typography.sizes.sm,
+    color: '#fff',
+  },
+
+  // Section label
+  moreEpisodesLabel: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: typography.sizes.sm,
+    color: colors.textSecondary,
+    letterSpacing: 0.3,
+    marginTop: spacing.xs,
   },
 
   // Video card

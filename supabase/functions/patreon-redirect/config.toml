@@ -1,0 +1,3 @@
+# patreon-redirect is called by Patreon's servers (not our app), so it cannot
+# carry a Supabase JWT. JWT verification must be disabled.
+verify_jwt = false

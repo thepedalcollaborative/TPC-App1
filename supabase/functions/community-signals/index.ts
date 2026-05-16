@@ -3,6 +3,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!;
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -18,6 +19,19 @@ const json = (body: unknown, status = 200) =>
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
 
+  const authHeader = req.headers.get('Authorization');
+  if (!authHeader?.startsWith('Bearer ')) {
+    return json({ error: 'Unauthorized' }, 401);
+  }
+
+  const userClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: { user }, error: authError } = await userClient.auth.getUser();
+  if (authError || !user) {
+    return json({ error: 'Unauthorized' }, 401);
+  }
+
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
   let body: Record<string, unknown>;
@@ -27,19 +41,27 @@ serve(async (req) => {
     return json({ error: 'Invalid JSON' }, 400);
   }
 
-  const {
-    action,
-    collection_pedal_ids = [],
-    gap_categories = [],
-    profile_genres = [],
-    profile_guitar_type = '',
-  } = body as {
+  const payload = body as {
     action: string;
-    collection_pedal_ids: string[];
-    gap_categories: string[];
-    profile_genres: string[];
-    profile_guitar_type: string;
+    collection_pedal_ids?: string[];
+    gap_categories?: string[];
+    profile_genres?: string[];
+    profile_guitar_type?: string;
   };
+  const action = payload.action;
+
+  const collection_pedal_ids = (payload.collection_pedal_ids ?? [])
+    .filter((v) => typeof v === 'string' && /^[0-9a-fA-F-]{36}$/.test(v))
+    .slice(0, 50);
+  const gap_categories = (payload.gap_categories ?? [])
+    .filter((v) => typeof v === 'string')
+    .slice(0, 20);
+  const profile_genres = (payload.profile_genres ?? [])
+    .filter((v) => typeof v === 'string')
+    .slice(0, 20);
+  const profile_guitar_type = typeof payload.profile_guitar_type === 'string'
+    ? payload.profile_guitar_type.slice(0, 60)
+    : '';
 
   if (action !== 'query') {
     return json({ error: 'Unknown action' }, 400);

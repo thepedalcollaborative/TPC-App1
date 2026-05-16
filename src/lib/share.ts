@@ -9,6 +9,7 @@
 import { Share } from 'react-native';
 import { captureRef } from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
+import * as FileSystem from 'expo-file-system';
 import type React from 'react';
 
 /**
@@ -28,11 +29,16 @@ export async function shareAsImage(
     quality: 1,
     result: 'tmpfile',
   });
-  if (await Sharing.isAvailableAsync()) {
-    await Sharing.shareAsync(uri, { mimeType: 'image/png', UTI: 'public.png' });
-  } else {
-    // Fallback: native Share (shows the file path — rare edge case)
-    await Share.share({ url: uri });
+  try {
+    if (await Sharing.isAvailableAsync()) {
+      await Sharing.shareAsync(uri, { mimeType: 'image/png', UTI: 'public.png' });
+    } else {
+      // Fallback: native Share (shows the file path — rare edge case)
+      await Share.share({ url: uri });
+    }
+  } finally {
+    // Clean up temp file so it doesn't accumulate in the app cache
+    FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
   }
 }
 
@@ -184,6 +190,152 @@ export async function shareProfile(
     TAGS,
   ];
   const msg = lines.filter(Boolean).join('\n');
+  await Share.share({ message: msg });
+}
+
+/**
+ * Share a TPC Advisor response.
+ * Moment: small share button below the last completed assistant message.
+ */
+export async function shareAdvisorResponse(text: string): Promise<void> {
+  // Trim to first ~280 chars for a clean snippet
+  const snippet = text.length > 280 ? text.slice(0, 280).trimEnd() + '…' : text;
+  const msg = [
+    `TPC Advisor just told me: 🎛`,
+    '',
+    `"${snippet}"`,
+    '',
+    `Ask yours → ${APP_URL}`,
+    '',
+    '#guitarpedals #pedalboard #tonehunter',
+  ].join('\n');
+  await Share.share({ message: msg });
+}
+
+/**
+ * Share a single GAS or Pass find.
+ * Moment: immediately after swiping GAS on a pedal.
+ */
+export async function shareGasFind(brand: string, model: string): Promise<void> {
+  const msg = [
+    `GASing hard for the ${brand} ${model} 🔥`,
+    '',
+    `Found it on TPC — ${APP_URL}`,
+    '',
+    '#guitarpedals #GAS #pedalboard #tonehunter',
+  ].join('\n');
+  await Share.share({ message: msg });
+}
+
+/**
+ * Share the user's full GAS List (wishlist).
+ * Moment: "Share GAS List" button in the wishlist tab.
+ */
+export async function shareGasList(
+  pedals: Array<{ brand: string; model: string }>,
+): Promise<void> {
+  const shown = pedals.slice(0, 8).map(p => `• ${p.brand} ${p.model}`);
+  if (pedals.length > 8) shown.push(`+${pedals.length - 8} more`);
+  const msg = [
+    `My GAS List 🔥`,
+    '',
+    ...shown,
+    '',
+    `${pedals.length} pedal${pedals.length !== 1 ? 's' : ''} on my radar. Track yours on TPC — ${APP_URL}`,
+    '',
+    '#guitarpedals #GAS #pedalNGD #tonehunter',
+  ].join('\n');
+  await Share.share({ message: msg });
+}
+
+/**
+ * Share a GAS or Pass session summary.
+ * Moment: from the session summary screen.
+ */
+export async function shareGasSession(
+  gasCount: number,
+  pedals: Array<{ brand: string; model: string }>,
+): Promise<void> {
+  const topPedal = pedals[0];
+  const headline = topPedal
+    ? `Just GAS'd ${gasCount} pedal${gasCount !== 1 ? 's' : ''} on TPC — starting with the ${topPedal.brand} ${topPedal.model} 🔥`
+    : `Swiped through pedals on TPC and GAS'd ${gasCount} of them 🔥`;
+  const msg = [
+    headline,
+    '',
+    `Find yours → ${APP_URL}`,
+    '',
+    '#guitarpedals #GAS #pedalboard #tonehunter',
+  ].join('\n');
+  await Share.share({ message: msg });
+}
+
+/**
+ * Share the user's FS/FT list.
+ * Moment: "Share My FS/FT List" strip in the For Sale/Trade tab.
+ */
+export type FsftPedal = {
+  brand: string;
+  model: string;
+  listing_status: 'for_sale' | 'for_trade' | 'for_sale_or_trade';
+  asking_price: number | null;
+};
+
+export async function shareFsftList(pedals: FsftPedal[]): Promise<void> {
+  const lines: string[] = [];
+  for (const p of pedals.slice(0, 10)) {
+    let line = `• ${p.brand} ${p.model}`;
+    if (p.listing_status === 'for_sale' || p.listing_status === 'for_sale_or_trade') {
+      line += p.asking_price != null ? ` — $${p.asking_price}` : ' — FS';
+    }
+    if (p.listing_status === 'for_trade' || p.listing_status === 'for_sale_or_trade') {
+      line += ' — FT';
+    }
+    lines.push(line);
+  }
+  if (pedals.length > 10) lines.push(`+${pedals.length - 10} more`);
+
+  const hasFS = pedals.some(p => p.listing_status !== 'for_trade');
+  const hasFT = pedals.some(p => p.listing_status !== 'for_sale');
+  const headline =
+    hasFS && hasFT ? 'Pedals For Sale & Trade 🎸' :
+    hasFS           ? 'Pedals For Sale 💰' :
+                      'Pedals For Trade 🔄';
+
+  const msg = [
+    headline,
+    '',
+    ...lines,
+    '',
+    `${pedals.length} pedal${pedals.length !== 1 ? 's' : ''} available. DMs open — tracked on TPC — ${APP_URL}`,
+    '',
+    '#guitarpedals #pedalboard #FS #FT #geartrade',
+  ].join('\n');
+  await Share.share({ message: msg });
+}
+
+const APP_STORE_URL = 'https://apps.apple.com/app/the-pedal-collaborative/id6741411198';
+
+/**
+ * Share the user's full collection (text fallback when image card fails).
+ * Moment: "Share My Collection" strip in the Owned tab.
+ */
+export async function shareCollectionList(
+  pedals: Array<{ brand: string; model: string }>,
+  username?: string,
+): Promise<void> {
+  const shown = pedals.slice(0, 8).map(p => `• ${p.brand} ${p.model}`);
+  if (pedals.length > 8) shown.push(`+${pedals.length - 8} more`);
+  const header = username ? `${username}'s Pedal Vault 🎛` : 'My Pedal Vault 🎛';
+  const msg = [
+    header,
+    '',
+    ...shown,
+    '',
+    `${pedals.length} pedal${pedals.length !== 1 ? 's' : ''} and counting. Track yours on TPC — ${APP_STORE_URL}`,
+    '',
+    '#guitarpedals #pedalboard #tonehunter',
+  ].join('\n');
   await Share.share({ message: msg });
 }
 

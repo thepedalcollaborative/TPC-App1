@@ -29,6 +29,8 @@ export const colors = {
   textPrimary: '#3D5261',    // brand Dark Slate — rich, not harsh black
   textSecondary: '#5E7585',  // mid-tone slate
   textMuted: '#8FA3AE',      // light muted slate
+  text: '#3D5261',           // alias for legacy usages
+  surfaceAlt: '#F5F5F5',     // alias for legacy usages
 
   // ── Effect category colors (distinct + legible on light backgrounds) ─────────
   drive: '#C45208',          // burnt orange

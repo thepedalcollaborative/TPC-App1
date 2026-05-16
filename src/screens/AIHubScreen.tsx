@@ -18,6 +18,7 @@ import {
   ActivityIndicator,
   Modal,
   Linking,
+  Alert,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
@@ -33,6 +34,7 @@ import { useShareCard } from '../lib/useShareCard';
 import { hasBetaFullAccess } from '../lib/subscription';
 import { reverbSearchUrl } from '../lib/reverb';
 import { weeklyPickCountdownLabel } from '../lib/notifications';
+import { SwipeDismissSheet } from '../components/SwipeDismissSheet';
 
 type Nav = NativeStackNavigationProp<AIStackParamList>;
 
@@ -46,7 +48,7 @@ type Feature = {
 };
 
 const CUSTOM_SHOP_FEATURES: Feature[] = [
-  { key: 'a', icon: 'sparkles-outline',     label: 'Tailored to your rig',      description: 'Pulls from your owned pedals, wishlist & retired gear' },
+  { key: 'a', icon: 'sparkles-outline',     label: 'Tailored to your rig',      description: 'Pulls from your owned pedals, GAS list & retired gear' },
   { key: 'b', icon: 'person-outline',       label: 'Knows your tone',            description: 'Uses your style profile to narrow the field' },
   { key: 'c', icon: 'trending-up-outline',  label: 'Interview-driven picks',    description: '4 quick questions sharpen the recommendation' },
 ];
@@ -292,10 +294,10 @@ export default function AIHubScreen() {
       <HubCard
         gradient={gradients.teal}
         badge="✦ CUSTOM SHOP"
-        title="Get Your Expert Pick"
+        title="Feed Your GAS"
         subtitle={lastPickLine}
         features={CUSTOM_SHOP_FEATURES}
-        cta={lastCustomShopPick ? 'Run It Again' : 'Get My Pick'}
+        cta={lastCustomShopPick ? 'Feed Your GAS Again' : 'Feed Your GAS'}
         onPress={goToCustomShop}
         isPro={isPro}
         freeLabel="1 FREE"
@@ -336,8 +338,7 @@ export default function AIHubScreen() {
       >
         <View style={styles.detailOverlay}>
           <TouchableOpacity style={styles.detailBackdrop} activeOpacity={1} onPress={() => setShowWeeklyDetail(false)} />
-          <View style={[styles.detailSheet, { paddingBottom: insets.bottom + 24 }]}>
-            <View style={styles.detailHandle} />
+          <SwipeDismissSheet style={[styles.detailSheet, { paddingBottom: insets.bottom + 24 }]} onDismiss={() => setShowWeeklyDetail(false)}>
             {/* Header */}
             <View style={styles.detailHeader}>
               <View style={styles.detailTitleRow}>
@@ -374,8 +375,24 @@ export default function AIHubScreen() {
                 disabled={weeklyWishlistState !== 'idle'}
                 onPress={async () => {
                   setWeeklyWishlistState('loading');
-                  const result = await addToWishlist(weeklyPick.brand, weeklyPick.model);
-                  setWeeklyWishlistState(result === 'exists' ? 'exists' : 'added');
+                  const result = await addToWishlist(weeklyPick.brand, weeklyPick.model, {
+                    category: weeklyPick.category ?? 'other',
+                    subcategory: 'Weekly Pick',
+                    description: weeklyPick.why ?? '',
+                    analog: false,
+                    price: null,
+                  });
+                  if (result === 'added') {
+                    setWeeklyWishlistState('added');
+                  } else if (result === 'exists') {
+                    setWeeklyWishlistState('exists');
+                  } else if (result === 'not_found') {
+                    setWeeklyWishlistState('idle');
+                    Alert.alert('Not in catalog yet', 'Could not add this pick right now. Please try again in a moment.');
+                  } else {
+                    setWeeklyWishlistState('idle');
+                    Alert.alert('Could not add', 'Please try again in a moment.');
+                  }
                 }}
               >
                 {weeklyWishlistState === 'loading' ? (
@@ -398,7 +415,7 @@ export default function AIHubScreen() {
                 )}
               </TouchableOpacity>
             </View>
-          </View>
+          </SwipeDismissSheet>
         </View>
       </Modal>
     )}
@@ -456,26 +473,26 @@ const styles = StyleSheet.create({
   },
   freeChip: {
     backgroundColor: 'rgba(255,255,255,0.12)',
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
     borderRadius: radius.full,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.25)',
   },
   freeChipText: {
-    fontSize: 9,
+    fontSize: 8,
     fontFamily: typography.bodySemiBold,
     color: 'rgba(255,255,255,0.8)',
     letterSpacing: 0.5,
   },
   proChip: {
     backgroundColor: colors.gold,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
     borderRadius: radius.full,
   },
   proChipText: {
-    fontSize: 9,
+    fontSize: 8,
     fontFamily: typography.bodySemiBold,
     color: '#1A1A1A',
     letterSpacing: 0.5,

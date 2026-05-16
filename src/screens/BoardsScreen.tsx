@@ -26,6 +26,7 @@ import { supabase, Board } from '../lib/supabase';
 import { EmptyState } from '../components';
 import { BoardsStackParamList } from '../types/navigation';
 import { boardCreationAllowed, FREE_BOARDS_LIMIT, hasBetaFullAccess } from '../lib/subscription';
+import { SwipeDismissSheet } from '../components/SwipeDismissSheet';
 
 const BOARD_EMOJIS = ['🎸', '🎶', '🎵', '🎛', '🔊', '⚡'];
 
@@ -196,7 +197,7 @@ export default function BoardsScreen() {
         renderItem={renderBoard}
         ListEmptyComponent={
           <EmptyState
-            emoji="🎛"
+            icon="grid-outline"
             title="No boards yet"
             subtitle="Create your first pedalboard to organize your setup"
             action="Create Board"
@@ -288,8 +289,7 @@ function NewBoardModal({ visible, onClose, onCreated, session }: NewBoardModalPr
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
         <TouchableOpacity style={styles.modalBackdrop} onPress={handleClose} activeOpacity={1} />
-        <View style={styles.modalSheet}>
-          <View style={styles.modalHandle} />
+        <SwipeDismissSheet style={styles.modalSheet} onDismiss={handleClose}>
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>New Board</Text>
             <TouchableOpacity onPress={handleClose}>
@@ -360,7 +360,7 @@ function NewBoardModal({ visible, onClose, onCreated, session }: NewBoardModalPr
               </LinearGradient>
             </TouchableOpacity>
           </View>
-        </View>
+        </SwipeDismissSheet>
       </KeyboardAvoidingView>
     </Modal>
   );

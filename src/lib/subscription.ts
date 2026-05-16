@@ -1,22 +1,22 @@
 /**
  * TPC Subscription layer
  *
- * Tracks free-tier usage in AsyncStorage and provides gate checks.
+ * Handles RevenueCat purchases, entitlement sync, milestone tracking, and
+ * board-creation gating. Free-tier advisor and Custom Shop gates are now
+ * enforced server-side via Supabase Edge Functions.
+ *
  * The `isPro` boolean comes from profile.is_premium (synced from Supabase).
  *
- * ── RevenueCat integration (Phase 2) ────────────────────────────────────────
- * When ready to wire real purchases:
+ * ── RevenueCat integration ────────────────────────────────────────────────
  *   1. npx expo install react-native-purchases
  *   2. Add to app.json plugins: ["react-native-purchases", { "apiKey": "appl_xxxx" }]
- *   3. Replace purchasePro() stub below with real Purchases.purchasePackage() call
- *   4. Configure RevenueCat webhook → Supabase function → update user_profiles.is_premium
- *   5. On app launch, call Purchases.configure() + sync entitlement to profile
+ *   3. Configure RevenueCat webhook → Supabase function → update user_profiles.is_premium
+ *   4. On app launch, call Purchases.configure() + sync entitlement to profile
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Purchases, { LOG_LEVEL } from 'react-native-purchases';
 import Constants from 'expo-constants';
-import { supabase } from './supabase';
 
 // ─── RevenueCat config ────────────────────────────────────────────────────────
 const extra =
@@ -36,6 +36,12 @@ const ENTITLEMENT_ID = 'pro'; // must match the entitlement key in RevenueCat da
 export function hasBetaFullAccess(): boolean {
   return BETA_FULL_ACCESS;
 }
+
+// Track whether RevenueCat was actually configured this session.
+// Guards syncEntitlement / restorePurchases from running against an
+// unconfigured SDK and writing stale false values to the database.
+let _rcConfigured = false;
+export function isRevenueCatConfigured(): boolean { return _rcConfigured; }
 
 function isExpoGoRuntime(): boolean {
   return (Constants as { appOwnership?: string }).appOwnership === 'expo';
@@ -62,43 +68,84 @@ export function configureRevenueCat(userId?: string): void {
     Purchases.setLogLevel(__DEV__ ? LOG_LEVEL.DEBUG : LOG_LEVEL.ERROR);
     Purchases.configure({ apiKey: RC_API_KEY });
     if (userId) Purchases.logIn(userId);
+    _rcConfigured = true;
   } catch (err) {
     if (__DEV__) console.warn('[TPC] RevenueCat configure error:', err);
   }
 }
 
 /**
- * Sync the RevenueCat entitlement to Supabase. Call on app launch after configure.
+ * Read the RevenueCat entitlement. Premium database writes must happen from
+ * trusted server-side paths such as RevenueCat webhooks.
  * Returns true if the user is currently Pro.
  */
-export async function syncEntitlement(userId: string): Promise<boolean> {
+export async function syncEntitlement(): Promise<boolean> {
+  // Only run when RevenueCat was actually configured this session.
+  // Without an RC key, getCustomerInfo() returns empty entitlements and would
+  // write is_premium: false to the DB — silently demoting manually-set Pro users.
+  if (!_rcConfigured) return false;
   try {
     const info = await Purchases.getCustomerInfo();
     const isPro = !!info.entitlements.active[ENTITLEMENT_ID];
-    await supabase.from('user_profiles').update({ is_premium: isPro }).eq('id', userId);
     return isPro;
   } catch { return false; }
 }
 
-// ─── Free-tier limits ─────────────────────────────────────────────────────────
-export const FREE_ADVISOR_MESSAGES_PER_MONTH = 5;
-export const FREE_CUSTOM_SHOP_RUNS_LIFETIME  = 1;
-export const FREE_BOARDS_LIMIT               = 2;
+// ─── Usage limits ─────────────────────────────────────────────────────────────
+export const FREE_BOARDS_LIMIT = 2;
 
 // ─── Pricing display ─────────────────────────────────────────────────────────
-export const PRICE_MONTHLY         = '$5.99';
-export const PRICE_ANNUAL          = '$49.99';
-export const PRICE_ANNUAL_MONTHLY  = '$4.17';
-export const PRICE_ANNUAL_SAVINGS  = '30%';
+// Fallback strings used in Expo Go (where RevenueCat can't run) and as
+// placeholders before live prices load. Always prefer fetchLivePrices().
+export const PRICE_MONTHLY         = '$3.99';
+export const PRICE_ANNUAL          = '$29.99';
+export const PRICE_ANNUAL_MONTHLY  = '$2.50';
+export const PRICE_ANNUAL_SAVINGS  = '37%';
+
+export type LivePrices = {
+  monthlyPrice: string;      // e.g. "$5.99"
+  annualPrice: string;       // e.g. "$49.99"
+  annualMonthlyPrice: string; // annual ÷ 12, formatted
+  savingsPercent: string;    // rounded % saved vs 12× monthly
+};
+
+/**
+ * Fetch real localized prices from RevenueCat / StoreKit.
+ * Returns null in Expo Go or if offerings aren't configured yet — callers
+ * should fall back to the PRICE_* constants in that case.
+ */
+export async function fetchLivePrices(): Promise<LivePrices | null> {
+  try {
+    const offerings = await Purchases.getOfferings();
+    const monthly = offerings.current?.monthly;
+    const annual  = offerings.current?.annual;
+    if (!monthly || !annual) return null;
+
+    const monthlyPrice = monthly.product.priceString;
+    const annualPrice  = annual.product.priceString;
+
+    // Per-month equivalent for the annual plan
+    const annualPerMonth = annual.product.price / 12;
+    // Use the same currency symbol as the annual priceString (e.g. "$")
+    const currencySymbol = annualPrice.replace(/[\d.,\s]/g, '').trim() || '$';
+    const annualMonthlyPrice = `${currencySymbol}${annualPerMonth.toFixed(2)}`;
+
+    // % savings vs paying monthly for 12 months
+    const fullMonthly = monthly.product.price * 12;
+    const savings = fullMonthly > 0
+      ? Math.round((1 - annual.product.price / fullMonthly) * 100)
+      : 0;
+    const savingsPercent = `${savings}%`;
+
+    return { monthlyPrice, annualPrice, annualMonthlyPrice, savingsPercent };
+  } catch {
+    return null;
+  }
+}
 
 // ─── AsyncStorage keys ────────────────────────────────────────────────────────
-function advisorMonthKey(): string {
-  const d = new Date();
-  return `tpc_advisor_${d.getFullYear()}_${String(d.getMonth() + 1).padStart(2, '0')}`;
-}
-const CUSTOM_SHOP_KEY  = 'tpc_custom_shop_runs';
-const MILESTONE_KEY    = 'tpc_milestones_shown'; // JSON: number[]
-const LAST_PICK_KEY    = 'tpc_last_custom_shop_pick'; // JSON: LastPick
+const MILESTONE_KEY       = 'tpc_milestones_shown';        // JSON: number[]
+const VALUE_MILESTONE_KEY = 'tpc_value_milestones_shown';  // JSON: number[]
 
 export type LastPick = {
   brand: string;
@@ -107,85 +154,15 @@ export type LastPick = {
   timestamp: string;
 };
 
-// ─── Advisor ──────────────────────────────────────────────────────────────────
-export async function getAdvisorMessageCount(): Promise<number> {
-  try {
-    const val = await AsyncStorage.getItem(advisorMonthKey());
-    return val ? parseInt(val, 10) : 0;
-  } catch { return 0; }
-}
-
-export async function incrementAdvisorCount(): Promise<void> {
-  try {
-    const count = await getAdvisorMessageCount();
-    await AsyncStorage.setItem(advisorMonthKey(), String(count + 1));
-  } catch {}
-}
-
-export async function advisorGate(isPro: boolean): Promise<{
-  allowed: boolean;
-  remaining: number;
-  showWarning: boolean;
-}> {
-  if (isPro || BETA_FULL_ACCESS) return { allowed: true, remaining: Infinity, showWarning: false };
-  const count = await getAdvisorMessageCount();
-  const remaining = Math.max(0, FREE_ADVISOR_MESSAGES_PER_MONTH - count);
-  return {
-    allowed: remaining > 0,
-    remaining,
-    showWarning: remaining === 1,
-  };
-}
-
-// ─── Custom Shop ──────────────────────────────────────────────────────────────
-export async function getCustomShopRunCount(): Promise<number> {
-  try {
-    const val = await AsyncStorage.getItem(CUSTOM_SHOP_KEY);
-    return val ? parseInt(val, 10) : 0;
-  } catch { return 0; }
-}
-
-export async function incrementCustomShopCount(): Promise<void> {
-  try {
-    const count = await getCustomShopRunCount();
-    await AsyncStorage.setItem(CUSTOM_SHOP_KEY, String(count + 1));
-  } catch {}
-}
-
-export async function customShopGate(isPro: boolean): Promise<{
-  allowed: boolean;
-  isFirstRun: boolean;
-}> {
-  if (isPro || BETA_FULL_ACCESS) return { allowed: true, isFirstRun: false };
-  const count = await getCustomShopRunCount();
-  return {
-    allowed: count < FREE_CUSTOM_SHOP_RUNS_LIFETIME,
-    isFirstRun: count === 0,
-  };
-}
-
 // ─── Boards ───────────────────────────────────────────────────────────────────
 export function boardCreationAllowed(isPro: boolean, currentBoardCount: number): boolean {
   if (isPro || BETA_FULL_ACCESS) return true;
   return currentBoardCount < FREE_BOARDS_LIMIT;
 }
 
-// ─── Last pick ────────────────────────────────────────────────────────────────
-export async function saveLastPick(pick: LastPick): Promise<void> {
-  try {
-    await AsyncStorage.setItem(LAST_PICK_KEY, JSON.stringify(pick));
-  } catch {}
-}
-
-export async function loadLastPick(): Promise<LastPick | null> {
-  try {
-    const raw = await AsyncStorage.getItem(LAST_PICK_KEY);
-    return raw ? (JSON.parse(raw) as LastPick) : null;
-  } catch { return null; }
-}
-
 // ─── Milestones ───────────────────────────────────────────────────────────────
-export const MILESTONE_COUNTS = [5, 10, 25, 50, 100];
+export const MILESTONE_COUNTS  = [5, 10, 25, 50, 100];
+export const VALUE_MILESTONES  = [1000, 5000, 10000, 25000, 50000];
 
 /**
  * Returns the milestone number if a new one was just crossed (and marks it shown).
@@ -206,24 +183,39 @@ export async function checkMilestone(pedalCount: number): Promise<number | null>
   } catch { return null; }
 }
 
+/**
+ * Returns the dollar threshold if a new value milestone was just crossed (and marks it shown).
+ * Returns null if no new milestone.
+ */
+export async function checkValueMilestone(totalValue: number): Promise<number | null> {
+  try {
+    const raw   = await AsyncStorage.getItem(VALUE_MILESTONE_KEY);
+    const shown: number[] = raw ? JSON.parse(raw) : [];
+    for (const ms of VALUE_MILESTONES) {
+      if (totalValue >= ms && !shown.includes(ms)) {
+        shown.push(ms);
+        await AsyncStorage.setItem(VALUE_MILESTONE_KEY, JSON.stringify(shown));
+        return ms;
+      }
+    }
+    return null;
+  } catch { return null; }
+}
+
 // ─── Purchases ────────────────────────────────────────────────────────────────
 
 /**
  * Trigger the App Store purchase sheet for the selected plan.
- * Pass userId so we can immediately update is_premium in Supabase on success.
  * Returns true if the user is now Pro, false if cancelled, throws on other errors.
  */
 export async function purchasePro(plan: 'monthly' | 'annual', userId?: string): Promise<boolean> {
+  void userId;
   const offerings = await Purchases.getOfferings();
   const pkg = plan === 'annual' ? offerings.current?.annual : offerings.current?.monthly;
   if (!pkg) throw new Error('No offerings available. Check RevenueCat dashboard setup.');
 
   const { customerInfo } = await Purchases.purchasePackage(pkg);
   const isPro = !!customerInfo.entitlements.active[ENTITLEMENT_ID];
-
-  if (userId) {
-    await supabase.from('user_profiles').update({ is_premium: isPro }).eq('id', userId);
-  }
   return isPro;
 }
 
@@ -232,11 +224,8 @@ export async function purchasePro(plan: 'monthly' | 'annual', userId?: string): 
  * Returns true if the user has an active Pro entitlement after restoring.
  */
 export async function restorePurchases(userId?: string): Promise<boolean> {
+  void userId;
   const info = await Purchases.restorePurchases();
   const isPro = !!info.entitlements.active[ENTITLEMENT_ID];
-
-  if (userId) {
-    await supabase.from('user_profiles').update({ is_premium: isPro }).eq('id', userId);
-  }
   return isPro;
 }

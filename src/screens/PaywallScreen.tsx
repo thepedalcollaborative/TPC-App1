@@ -9,7 +9,7 @@
  *   openPaywall('advisor');   // or 'custom_shop' | 'boards' | 'weekly_pick'
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Alert,
   View,
@@ -31,6 +31,7 @@ import {
   PRICE_ANNUAL,
   PRICE_ANNUAL_MONTHLY,
   PRICE_ANNUAL_SAVINGS,
+  fetchLivePrices,
   purchasePro,
   restorePurchases,
 } from '../lib/subscription';
@@ -43,7 +44,7 @@ const tpcSquare = require('../../assets/tpc-square.png');
 const HERO_COPY: Record<PaywallReason, { headline: string; sub: string }> = {
   advisor: {
     headline: "You've found your flow.",
-    sub:      "You've used your 5 free sessions. Keep the conversation going.",
+    sub:      "You've hit your free message limit for this month. Keep the conversation going.",
   },
   custom_shop: {
     headline: "Your pick is ready.",
@@ -80,9 +81,25 @@ type PaywallScreenProps = {
 export default function PaywallScreen({ visible, reason, onClose }: PaywallScreenProps) {
   const insets      = useSafeAreaInsets();
   const { session, fetchProfile } = useStore();
-  const [plan, setPlan]     = useState<'monthly' | 'annual'>('annual');
-  const [loading, setLoading] = useState(false);
+  const [plan, setPlan]       = useState<'monthly' | 'annual'>('annual');
+  const [loading, setLoading]   = useState(false);
   const [restoring, setRestoring] = useState(false);
+
+  // Live prices from StoreKit via RevenueCat — fall back to constants in Expo Go
+  const [priceMonthly, setPriceMonthly]           = useState(PRICE_MONTHLY);
+  const [priceAnnual, setPriceAnnual]             = useState(PRICE_ANNUAL);
+  const [priceAnnualMonthly, setPriceAnnualMonthly] = useState(PRICE_ANNUAL_MONTHLY);
+  const [priceSavings, setPriceSavings]           = useState(PRICE_ANNUAL_SAVINGS);
+
+  useEffect(() => {
+    fetchLivePrices().then(live => {
+      if (!live) return; // Expo Go or offerings not configured — keep fallbacks
+      setPriceMonthly(live.monthlyPrice);
+      setPriceAnnual(live.annualPrice);
+      setPriceAnnualMonthly(live.annualMonthlyPrice);
+      setPriceSavings(live.savingsPercent);
+    });
+  }, []);
 
   const hero = HERO_COPY[reason] ?? HERO_COPY.general;
   const userId = session?.user?.id;
@@ -175,7 +192,7 @@ export default function PaywallScreen({ visible, reason, onClose }: PaywallScree
                 Monthly
               </Text>
               <Text style={[styles.planBtnPrice, plan === 'monthly' && styles.planBtnPriceActive]}>
-                {PRICE_MONTHLY}/mo
+                {priceMonthly}/mo
               </Text>
             </TouchableOpacity>
 
@@ -185,16 +202,16 @@ export default function PaywallScreen({ visible, reason, onClose }: PaywallScree
               activeOpacity={0.8}
             >
               <View style={styles.saveBadge}>
-                <Text style={styles.saveBadgeText}>SAVE {PRICE_ANNUAL_SAVINGS}</Text>
+                <Text style={styles.saveBadgeText}>SAVE {priceSavings}</Text>
               </View>
               <Text style={[styles.planBtnLabel, plan === 'annual' && styles.planBtnLabelActive]}>
                 Annual
               </Text>
               <Text style={[styles.planBtnPrice, plan === 'annual' && styles.planBtnPriceActive]}>
-                {PRICE_ANNUAL}/yr
+                {priceAnnual}/yr
               </Text>
               <Text style={[styles.planBtnSub, plan === 'annual' && styles.planBtnSubActive]}>
-                {PRICE_ANNUAL_MONTHLY}/month
+                {priceAnnualMonthly}/month
               </Text>
             </TouchableOpacity>
           </View>
@@ -219,8 +236,8 @@ export default function PaywallScreen({ visible, reason, onClose }: PaywallScree
 
           <Text style={styles.legalText}>
             {plan === 'annual'
-              ? `Billed ${PRICE_ANNUAL} annually. Cancel anytime.`
-              : `Billed ${PRICE_MONTHLY} monthly. Cancel anytime.`}
+              ? `${priceAnnual}/year, auto-renews annually. Cancel anytime in App Store Settings.`
+              : `${priceMonthly}/month, auto-renews monthly. Cancel anytime in App Store Settings.`}
           </Text>
 
           {/* ── Restore + dismiss ── */}

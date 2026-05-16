@@ -124,7 +124,7 @@ export function PostOnboardingScreen({ onGetMyPick, onExplore }: PostOnboardingS
           style={styles.primaryCTAWrap}
         >
           <LinearGradient colors={gradients.teal} style={styles.primaryCTA}>
-            <Text style={styles.primaryCTAText}>Get My First Expert Pick →</Text>
+            <Text style={styles.primaryCTAText}>Feed Your GAS →</Text>
           </LinearGradient>
         </TouchableOpacity>
 

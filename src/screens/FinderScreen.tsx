@@ -16,10 +16,12 @@ import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, spacing, radius, gradients, categoryColors } from '../theme';
-import { CategoryBadge, ExpertMode } from '../components';
+import { CategoryBadge, ExpertMode, GasOrPassMode } from '../components';
 import { useStore } from '../hooks/useStore';
-import { invokeEdgeFunction } from '../lib/supabase';
+import { useRoute, RouteProp } from '@react-navigation/native';
+import { supabase, invokeEdgeFunction } from '../lib/supabase';
 import { shareRecommendation } from '../lib/share';
+import { ownedExclusionKeys } from '../lib/pedalNormalization';
 import { HiddenShareCard } from '../components/ShareCard';
 import { useShareCard } from '../lib/useShareCard';
 
@@ -31,10 +33,21 @@ type FinderPedal = {
   photo_url: string | null;
   in_catalog?: boolean;
   pedal_id?: string | null;
+  description?: string | null;
+};
+
+type SocialCounts = {
+  vault_count: number;
+  gas_count: number;
+};
+
+type SearchPedalsResponse = {
+  results?: FinderPedal[];
+  pedals?: Array<{ image_url?: string | null }>;
 };
 
 type Screen = 'idle' | 'quiz' | 'loading' | 'result';
-type Mode = 'quiz' | 'expert';
+type Mode = 'quiz' | 'expert' | 'gasOrPass';
 
 // ─── Quiz Data ────────────────────────────────────────────────────────────────
 
@@ -186,13 +199,14 @@ const NO_RESULTS_MSG = 'Reverb did not return any pedals. Try again in a moment.
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function FinderScreen() {
   const insets = useSafeAreaInsets();
-  const { addToWishlist, ownedPedals, retiredPedals, profile } = useStore();
+  const route = useRoute<RouteProp<{ Finder: { startMode?: 'expert' } }, 'Finder'>>();
+  const { addToWishlist, ownedPedals, wishlistPedals, retiredPedals, profile } = useStore();
   const hasProfile = Boolean(profile?.pedal_expert_profile?.onboarding_completed_at);
   const quizSteps = hasProfile
     ? [Q1_PROFILE, ...QUIZ_STEPS_SHARED]
     : [Q1_DEFAULT, ...QUIZ_STEPS_SHARED];
   const { cardRef: shareCardRef, cardData: shareCardData, triggerShare } = useShareCard();
-  const [mode, setMode] = useState<Mode>('quiz');
+  const [mode, setMode] = useState<Mode>(route.params?.startMode === 'expert' ? 'expert' : 'quiz');
   const [screen, setScreen] = useState<Screen>('idle');
   const [step, setStep] = useState(0);
   const [answers, setAnswers] = useState<string[]>([]);
@@ -200,6 +214,7 @@ export default function FinderScreen() {
   const [wishlistState, setWishlistState] = useState<'idle' | 'loading' | 'added'>('idle');
   const [resultImageUrl, setResultImageUrl] = useState<string | null>(null);
   const [showImageModal, setShowImageModal] = useState(false);
+  const [socialCounts, setSocialCounts] = useState<SocialCounts | null>(null);
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const slideAnim = useRef(new Animated.Value(0)).current;
   const reverbCache = useRef(new Map<string, FinderPedal[]>()).current;
@@ -208,22 +223,53 @@ export default function FinderScreen() {
   useEffect(() => {
     setWishlistState('idle');
     setResultImageUrl(null);
+    setSocialCounts(null);
     if (!result) return;
+
+    // Fetch social proof counts + description in background
+    const pedalId = result.pedal_id;
+    if (pedalId) {
+      Promise.all([
+        // Community-wide vault/gas counts via SECURITY DEFINER RPC.
+        // Direct user_pedals queries are RLS-filtered to the calling user's
+        // own rows and would always return 0 for other users.
+        supabase.rpc('get_pedal_social_counts', { p_pedal_id: pedalId }),
+        // description
+        !result.description
+          ? supabase.from('pedals').select('description').eq('id', pedalId).maybeSingle()
+          : Promise.resolve({ data: null }),
+      ]).then(([countsRes, descRes]) => {
+        const row = (countsRes as { data: Array<{ vault_count: number; gas_count: number }> | null }).data?.[0];
+        setSocialCounts({
+          vault_count: Number(row?.vault_count ?? 0),
+          gas_count:   Number(row?.gas_count   ?? 0),
+        });
+        const descRow = (descRes as { data: { description?: string | null } | null }).data;
+        if (descRow?.description) {
+          // Patch description onto result so it's available for display
+          setResult(prev => prev ? { ...prev, description: descRow.description ?? null } : prev);
+        }
+      }).catch(() => {});
+    }
 
     if (result.photo_url) {
       setResultImageUrl(result.photo_url);
       return;
     }
 
-    // Fallback to DB (if available)
-    invokeEdgeFunction('search-pedals', {
+    // Fallback: search Reverb for a listing photo
+    invokeEdgeFunction<SearchPedalsResponse>('search-pedals', {
       query: `${result.brand} ${result.model}`,
-      localOnly: true,
     })
       .then(({ data }) => {
+        // Try live Reverb results first (have photo_url)
+        const reverbResults = (data?.results as { photo_url?: string }[]) ?? [];
+        const reverbHit = reverbResults.find(p => p.photo_url);
+        if (reverbHit?.photo_url) { setResultImageUrl(reverbHit.photo_url); return; }
+        // Then try local catalog fallback
         const pedals = (data?.pedals as { image_url?: string }[]) ?? [];
-        const hit = pedals.find(p => p.image_url);
-        if (hit?.image_url) setResultImageUrl(hit.image_url);
+        const localHit = pedals.find(p => p.image_url);
+        if (localHit?.image_url) setResultImageUrl(localHit.image_url);
       })
       .catch(() => {});
   }, [result]);
@@ -242,7 +288,12 @@ export default function FinderScreen() {
     for (const up of [...ownedPedals, ...retiredPedals]) {
       const pedal = up.pedal;
       if (!pedal) continue;
-      set.add(`${pedal.brand.toLowerCase()}|${pedal.model.toLowerCase()}`);
+      // ID-based exclusion — survives brand/model string mismatches
+      if (up.pedal_id) set.add(`id:${up.pedal_id}`);
+      // Brand+model exclusion — catches colorway variants of owned pedals
+      for (const key of ownedExclusionKeys(pedal.brand, pedal.model)) {
+        set.add(key);
+      }
     }
     return set;
   }, [ownedPedals, retiredPedals]);
@@ -250,7 +301,7 @@ export default function FinderScreen() {
   const fetchReverbCandidates = useCallback(async (query: string) => {
     const key = query.toLowerCase().trim();
     if (reverbCache.has(key)) return reverbCache.get(key)!;
-    const { data } = await invokeEdgeFunction('search-pedals', { query });
+    const { data } = await invokeEdgeFunction<SearchPedalsResponse>('search-pedals', { query });
     const results = (data?.results as FinderPedal[]) ?? [];
     reverbCache.set(key, results);
     return results;
@@ -299,25 +350,72 @@ export default function FinderScreen() {
   // handleBackToIdle is the same operation — reuse handleReset
   const handleBackToIdle = handleReset;
 
+  const SURPRISE_CATEGORIES = ['drive', 'delay', 'reverb', 'modulation', 'ambient', 'looper', 'pitch'];
+
   const handleSurpriseMe = async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setResult(null);
     setScreen('loading');
 
-    for (let i = 0; i < 3; i++) {
-      const query = SURPRISE_QUERIES[Math.floor(Math.random() * SURPRISE_QUERIES.length)];
-      const pool = await pickRandomFromQuery(query);
-      if (pool.length > 0) {
-        const random = pool[Math.floor(Math.random() * pool.length)];
-        setResult(random);
-        setScreen('result');
-        setTimeout(animateIn, 50);
-        return;
+    const shuffled = [...SURPRISE_CATEGORIES].sort(() => Math.random() - 0.5);
+
+    // ── Pass 1: Reverb (has photos, fresh data) ────────────────────────────────
+    for (const category of shuffled.slice(0, 4)) {
+      try {
+        const query = CATEGORY_QUERY[category] ?? `${category} pedal`;
+        const candidates = await fetchReverbCandidates(query);
+        const available = candidates.filter(
+          p => !excluded.has(`${p.brand.toLowerCase()}|${p.model.toLowerCase()}`),
+        );
+        if (available.length > 0) {
+          // Prefer candidates with photos but don't require them
+          const withPhoto = available.filter(p => p.photo_url);
+          const pool = withPhoto.length > 0 ? withPhoto : available;
+          const random = pool[Math.floor(Math.random() * pool.length)];
+          setResult(random);
+          setScreen('result');
+          setTimeout(animateIn, 50);
+          return;
+        }
+      } catch {
+        // Try next category
       }
     }
 
+    // ── Pass 2: Local catalog fallback (always available offline) ─────────────
+    try {
+      const { data: localPedals } = await supabase
+        .from('pedals')
+        .select('id, brand, model, category, avg_price, image_url')
+        .in('category', shuffled.slice(0, 3))
+        .limit(60);
+
+      if (localPedals && localPedals.length > 0) {
+        const available = localPedals.filter(p =>
+          !excluded.has(`${p.brand.toLowerCase()}|${p.model.toLowerCase()}`),
+        );
+        if (available.length > 0) {
+          const random = available[Math.floor(Math.random() * available.length)];
+          setResult({
+            brand: random.brand,
+            model: random.model,
+            category: random.category,
+            avg_price: random.avg_price ?? null,
+            photo_url: random.image_url ?? null,
+            in_catalog: true,
+            pedal_id: random.id,
+          });
+          setScreen('result');
+          setTimeout(animateIn, 50);
+          return;
+        }
+      }
+    } catch {
+      // Fall through
+    }
+
     setScreen('idle');
-    Alert.alert('No suggestions right now', NO_RESULTS_MSG);
+    Alert.alert('No suggestions right now', "Your vault covers a lot of ground! Try a different category.");
   };
 
   const handleStartQuiz = () => {
@@ -359,7 +457,10 @@ export default function FinderScreen() {
     setWishlistState('loading');
     const outcome = await addToWishlist(result.brand, result.model, {
       category: result.category,
-      price: result.avg_price ?? undefined,
+      subcategory: 'Recommended',
+      description: result.description ?? '',
+      analog: false,
+      price: result.avg_price ?? null,
     });
     if (outcome === 'added') {
       setWishlistState('added');
@@ -389,6 +490,18 @@ export default function FinderScreen() {
       {/* ── Expert Mode (full-screen) ── */}
       {mode === 'expert' && (
         <ExpertMode onBack={() => setMode('quiz')} />
+      )}
+
+      {/* ── GAS or Pass mode ── */}
+      {mode === 'gasOrPass' && (
+        <GasOrPassMode
+          onBack={() => setMode('quiz')}
+          ownedPedals={ownedPedals}
+          wishlistPedals={wishlistPedals}
+          retiredPedals={retiredPedals}
+          addToWishlist={addToWishlist}
+          profile={profile}
+        />
       )}
 
       {/* ── Quiz / Idle / Result ── */}
@@ -438,20 +551,25 @@ export default function FinderScreen() {
               </LinearGradient>
             </TouchableOpacity>
 
-            {/* Dial It In */}
+            {/* GAS or Pass */}
             <TouchableOpacity
-              style={styles.pillLight}
-              onPress={handleStartQuiz}
-              activeOpacity={0.75}
+              style={{ flex: 1 }}
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                setMode('gasOrPass');
+              }}
+              activeOpacity={0.85}
             >
-              <View style={styles.pillIconWrapLight}>
-                <Ionicons name="options-outline" size={22} color={colors.teal} />
-              </View>
-              <View style={styles.pillTextBlock}>
-                <Text style={styles.pillTitleDark}>Dial It In</Text>
-                <Text style={styles.pillSubDark}>{hasProfile ? 'Tailored to your tone profile' : '3 questions to narrow down your pick'}</Text>
-              </View>
-              <Ionicons name="chevron-forward" size={22} color={colors.textMuted} />
+              <LinearGradient colors={[colors.rose, colors.roseDark]} style={styles.pill}>
+                <View style={styles.pillIconWrapDark}>
+                  <Ionicons name="flame-outline" size={22} color="#FFFFFF" />
+                </View>
+                <View style={styles.pillTextBlock}>
+                  <Text style={styles.pillTitle}>GAS or Pass</Text>
+                  <Text style={styles.pillSub}>Swipe through pedals you don't own yet</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={22} color="rgba(255,255,255,0.65)" />
+              </LinearGradient>
             </TouchableOpacity>
           </View>
         )}
@@ -559,22 +677,48 @@ export default function FinderScreen() {
                 <View style={styles.resultTop}>
                   <View style={styles.resultTopText}>
                     <CategoryBadge category={result.category} />
-                <Text style={styles.resultBrand}>{result.brand}</Text>
-              </View>
-            </View>
-
-            <Text style={styles.resultModel}>{result.model}</Text>
-            <Text style={styles.resultSubcategory}>{result.category}</Text>
-
-            <View style={styles.resultMeta}>
-              {result.avg_price != null && (
-                <View style={styles.resultPriceBadge}>
-                  <Text style={styles.resultPrice}>~${result.avg_price}</Text>
+                    <Text style={styles.resultBrand}>{result.brand}</Text>
+                  </View>
                 </View>
-              )}
-            </View>
-          </View>
-        </LinearGradient>
+
+                <Text style={styles.resultModel}>{result.model}</Text>
+
+                {result.description ? (
+                  <Text style={styles.resultDescription} numberOfLines={3}>
+                    {result.description}
+                  </Text>
+                ) : null}
+
+                <View style={styles.resultMeta}>
+                  {result.avg_price != null && (
+                    <View style={styles.resultPriceBadge}>
+                      <Text style={styles.resultPrice}>${result.avg_price}</Text>
+                    </View>
+                  )}
+                </View>
+
+                {socialCounts && (socialCounts.vault_count > 0 || socialCounts.gas_count > 0) ? (
+                  <View style={styles.socialRow}>
+                    {socialCounts.vault_count > 0 && (
+                      <View style={styles.socialChip}>
+                        <Ionicons name="cube-outline" size={12} color={colors.teal} />
+                        <Text style={styles.socialChipText}>
+                          {socialCounts.vault_count} in vaults
+                        </Text>
+                      </View>
+                    )}
+                    {socialCounts.gas_count > 0 && (
+                      <View style={styles.socialChip}>
+                        <Ionicons name="flame-outline" size={12} color={colors.rose} />
+                        <Text style={[styles.socialChipText, { color: colors.rose }]}>
+                          {socialCounts.gas_count} want this
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                ) : null}
+              </View>
+            </LinearGradient>
 
             {/* Actions */}
             <View style={styles.resultActions}>
@@ -595,7 +739,7 @@ export default function FinderScreen() {
                     <ActivityIndicator size="small" color="#fff" />
                   ) : (
                     <Text style={styles.resultActionPrimaryText}>
-                      {wishlistState === 'added' ? '✓ Added to Wishlist' : 'Add to Wishlist'}
+                      {wishlistState === 'added' ? '✓ Added to GAS List' : 'Add to GAS List'}
                     </Text>
                   )}
                 </LinearGradient>
@@ -958,6 +1102,35 @@ const styles = StyleSheet.create({
   },
   resultPrice: {
     fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.teal,
+  },
+  resultDescription: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.body,
+    color: colors.textSecondary,
+    lineHeight: 18,
+    marginTop: spacing.sm,
+  },
+  socialRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+    flexWrap: 'wrap',
+  },
+  socialChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: colors.teal + '12',
+    borderWidth: 1,
+    borderColor: colors.teal + '30',
+    borderRadius: radius.full,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  socialChipText: {
+    fontSize: typography.sizes.xs,
     fontFamily: typography.bodySemiBold,
     color: colors.teal,
   },

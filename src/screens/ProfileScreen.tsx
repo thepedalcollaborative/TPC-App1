@@ -224,13 +224,16 @@ export default function ProfileScreen() {
 
   const handleToneProfileSave = async (updated: FullExpertProfile) => {
     if (!session) return;
-    await supabase
+    const { error } = await supabase
       .from('user_profiles')
       .update({ pedal_expert_profile: updated })
       .eq('id', session.user.id);
+    if (error) {
+      console.warn('[Profile] tone save error:', error.message);
+      return;
+    }
     await fetchProfile();
-    setShowToneEditor(false);
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    Haptics.selectionAsync();
   };
 
   const displayName = profile?.display_name ?? session?.user.email?.split('@')[0] ?? 'Guitarist';
@@ -332,7 +335,7 @@ export default function ProfileScreen() {
               onPress={() => { Haptics.selectionAsync(); togglePremiumMinimized(); }}
               activeOpacity={0.8}
             >
-              <Text style={styles.premiumMinimizedText}>✦ GO PREMIUM</Text>
+              <Text style={styles.premiumMinimizedText}>✦ GO PRO</Text>
               <Ionicons name="chevron-down" size={14} color={colors.teal} />
             </TouchableOpacity>
           ) : (
@@ -342,7 +345,7 @@ export default function ProfileScreen() {
             >
               <View style={styles.premiumTop}>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.premiumBadge}>✦ GO PREMIUM</Text>
+                  <Text style={styles.premiumBadge}>✦ GO PRO</Text>
                   <Text style={styles.premiumTitle}>Unlock Everything</Text>
                 </View>
                 <TouchableOpacity
@@ -358,14 +361,14 @@ export default function ProfileScreen() {
               </Text>
               <View style={styles.premiumPriceRow}>
                 <View style={styles.premiumPriceCard}>
-                  <Text style={styles.premiumPrice}>$6.99</Text>
+                  <Text style={styles.premiumPrice}>$3.99</Text>
                   <Text style={styles.premiumPricePer}>/ month</Text>
                 </View>
                 <View style={styles.premiumPriceCard}>
-                  <Text style={styles.premiumPrice}>$59.99</Text>
+                  <Text style={styles.premiumPrice}>$29.99</Text>
                   <Text style={styles.premiumPricePer}>/ year</Text>
                   <View style={styles.premiumSaveBadge}>
-                    <Text style={styles.premiumSaveText}>SAVE 28%</Text>
+                    <Text style={styles.premiumSaveText}>SAVE 37%</Text>
                   </View>
                 </View>
               </View>
@@ -377,7 +380,7 @@ export default function ProfileScreen() {
                   openPaywall('general');
                 }}
               >
-                <Text style={styles.premiumCTAText}>Go Premium →</Text>
+                <Text style={styles.premiumCTAText}>Go Pro →</Text>
               </TouchableOpacity>
             </LinearGradient>
           )}
