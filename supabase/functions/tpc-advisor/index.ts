@@ -33,12 +33,15 @@ const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 // Rate limiting is handled via the persistent check_rate_limit() RPC in Postgres.
 // This survives cold starts and concurrent invocations unlike an in-memory Map.
 
-// Whitelist prevents clients from requesting arbitrary models
-const ALLOWED_MODELS = new Set([
-  'claude-haiku-4-5',
-  'claude-sonnet-4-5',
-]);
+// Per-purpose model whitelist. Chat and memory are locked to Haiku so a
+// bypasser can't burn Sonnet tokens on the cheap quota; Custom Shop may use
+// Sonnet for the final pick (its ticket is gated by consume_custom_shop_run).
 const DEFAULT_MODEL = 'claude-haiku-4-5';
+const MODELS_BY_PURPOSE: Record<string, Set<string>> = {
+  chat:        new Set(['claude-haiku-4-5']),
+  memory:      new Set(['claude-haiku-4-5']),
+  custom_shop: new Set(['claude-haiku-4-5', 'claude-sonnet-4-5']),
+};
 
 // Built-in Anthropic web search tool (server-side — Anthropic executes the search)
 const WEB_SEARCH_TOOL = {
@@ -134,7 +137,16 @@ serve(async (req) => {
       maxTokens,
       model: requestedModel,
       enableWebSearch = false,
+      purpose: requestedPurpose,
+      ticket,
     } = await req.json();
+
+    // Untrusted client input — anything unrecognized is treated as chat,
+    // which carries the strictest quota.
+    const purpose: 'chat' | 'custom_shop' | 'memory' =
+      requestedPurpose === 'custom_shop' || requestedPurpose === 'memory'
+        ? requestedPurpose
+        : 'chat';
 
     const apiKey = Deno.env.get('ANTHROPIC_API_KEY');
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
@@ -208,7 +220,89 @@ serve(async (req) => {
       );
     }
 
-    const allowWebSearch = Boolean(enableWebSearch);
+    // ── Quota enforcement (server-side, per purpose) ──────────────────────────
+    // Consumed BEFORE the Anthropic call so denied requests cost nothing.
+    // quotaInfo is attached to non-streaming chat responses for the counter UI.
+    let quotaInfo: Record<string, unknown> | null = null;
+    let isProUser = false;
+
+    if (purpose === 'chat') {
+      const { data: qData, error: qErr } = await userClient.rpc('consume_ai_message_quota', {
+        p_user_id: user.id,
+      });
+      if (qErr) {
+        console.error('[tpc-advisor] quota RPC error:', qErr.message);
+        return new Response(
+          JSON.stringify({ error: 'internal_error' }),
+          { status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
+      }
+      const q = Array.isArray(qData) ? qData[0] : qData;
+      if (!q?.allowed) {
+        if (q?.error === 'pro_required') {
+          return new Response(
+            JSON.stringify({ error: 'pro_required', free_used: q.free_used ?? 3, free_allotment: q.free_allotment ?? 3 }),
+            { status: 403, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+          );
+        }
+        if (q?.error === 'messages_depleted') {
+          return new Response(
+            JSON.stringify({ error: 'messages_depleted', credits: q.credits ?? 0 }),
+            { status: 402, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response(
+          JSON.stringify({ error: q?.error ?? 'unauthorized' }),
+          { status: 401, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
+      }
+      // Free-tier rows carry free_used; Pro rows carry used/allotment.
+      isProUser = q.free_used == null;
+      quotaInfo = {
+        used: q.used, allotment: q.allotment, credits: q.credits,
+        used_credit: q.used_credit, free_used: q.free_used, free_allotment: q.free_allotment,
+      };
+    } else if (purpose === 'custom_shop') {
+      // Ticket issued by custom-shop-gate after consume_custom_shop_run.
+      // Without a valid ticket the purpose claim is worthless.
+      if (!ticket || typeof ticket !== 'string') {
+        return new Response(
+          JSON.stringify({ error: 'invalid_ticket' }),
+          { status: 403, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
+      }
+      const adminForTicket = createClient(supabaseUrl, serviceRoleKey);
+      const { data: ok, error: tErr } = await adminForTicket.rpc('consume_custom_shop_ticket', {
+        p_ticket: ticket,
+        p_user_id: user.id,
+      });
+      if (tErr || !ok) {
+        return new Response(
+          JSON.stringify({ error: 'invalid_ticket' }),
+          { status: 403, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
+      }
+      isProUser = true; // run quota already validated Pro/free-run status
+    } else {
+      // memory: Pro-only background summarization, Haiku, small output.
+      const adminForProfile = createClient(supabaseUrl, serviceRoleKey);
+      const { data: profileRow } = await adminForProfile
+        .from('user_profiles')
+        .select('is_premium')
+        .eq('id', user.id)
+        .single();
+      if (!profileRow?.is_premium) {
+        return new Response(
+          JSON.stringify({ error: 'pro_required' }),
+          { status: 403, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
+      }
+      isProUser = true;
+    }
+
+    // Web search costs $0.01/search — Pro (or ticketed Custom Shop) only,
+    // and never for memory summarization.
+    const allowWebSearch = Boolean(enableWebSearch) && purpose !== 'memory' && isProUser;
 
     // ── Recent pedals feed ────────────────────────────────────────────────────
     // Inject a compact "recently trending" block into the system prompt so
@@ -237,9 +331,15 @@ serve(async (req) => {
       console.warn('[tpc-advisor] recent_pedals fetch failed:', (e as Error).message);
     }
 
-    const model = (requestedModel && ALLOWED_MODELS.has(requestedModel))
+    const model = (requestedModel && MODELS_BY_PURPOSE[purpose].has(requestedModel))
       ? requestedModel
       : DEFAULT_MODEL;
+
+    // Memory summarization never needs long output — hard cap regardless of
+    // what the client requested.
+    const effectiveMaxTokens = purpose === 'memory'
+      ? Math.min(maxTokens ?? 1024, 1024)
+      : maxTokens;
 
     // Merge client-supplied tools with custom and built-in tools
     const allTools = [
@@ -277,7 +377,7 @@ serve(async (req) => {
     for (let i = 0; i < MAX_ITERATIONS; i++) {
       const requestBody: Record<string, unknown> = {
         model,
-        max_tokens: maxTokens ?? (hasTools ? 4096 : 1024),
+        max_tokens: effectiveMaxTokens ?? (hasTools ? 4096 : 1024),
         stream: shouldStream && i === 0, // only stream on first iteration, tools kill it anyway
         messages: currentMessages,
       };
@@ -362,7 +462,7 @@ serve(async (req) => {
     }
 
     return new Response(
-      JSON.stringify({ content: finalContent }),
+      JSON.stringify({ content: finalContent, ...(quotaInfo ? { quota: quotaInfo } : {}) }),
       { headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
     );
 

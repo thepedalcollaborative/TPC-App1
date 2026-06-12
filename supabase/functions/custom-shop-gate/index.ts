@@ -64,9 +64,24 @@ Deno.serve(async (req) => {
     return json({ allowed: false, error: row.error ?? 'unauthorized' }, 401);
   }
 
+  // Issue a single-run ticket — tpc-advisor requires it for custom_shop calls
+  // (analysis + interview questions + final pick + retries; 8 calls / 20 min).
+  const admin = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+  );
+  const { data: ticket, error: ticketErr } = await admin.rpc('create_custom_shop_ticket', {
+    p_user_id: user.id,
+  });
+  if (ticketErr || !ticket) {
+    console.error('[custom-shop-gate] ticket error:', ticketErr?.message);
+    return json({ allowed: false, error: 'internal_error' }, 500);
+  }
+
   return json({
     allowed:    true,
     isFirstRun: row.runs_used === 1,
     runsUsed:   row.runs_used,
+    ticket,
   });
 });

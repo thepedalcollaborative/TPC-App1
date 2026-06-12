@@ -313,7 +313,7 @@ export default function AIHubScreen() {
         cta="Start Chatting"
         onPress={goToAdvisor}
         isPro={isPro}
-        freeLabel="5 FREE / MO"
+        freeLabel="3 FREE TRIAL"
       />
 
       {/* Pro upsell strip */}

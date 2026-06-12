@@ -81,6 +81,7 @@ Return ONLY the updated memory text. No preamble, no explanation.`;
         messages: [{ role: 'user', content: prompt }],
         systemPrompt: 'You are a concise memory summariser. Return only the updated memory text.',
         stream: false,
+        purpose: 'memory',
         // Default Haiku model — cheapest, plenty fast enough for summarisation
       }),
     });

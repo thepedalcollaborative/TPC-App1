@@ -22,10 +22,23 @@ export type Message = {
   content: string | ContentBlock[];
 };
 
+export type QuotaInfo = {
+  used?: number | null;
+  allotment?: number | null;
+  credits?: number | null;
+  used_credit?: boolean | null;
+  free_used?: number | null;
+  free_allotment?: number | null;
+};
+
 export type StreamChunk = {
   type: 'text' | 'done' | 'error';
   text?: string;
   error?: string;
+  /** Gate rejection from the server — drives paywall vs. retry UX */
+  code?: 'pro_required' | 'messages_depleted';
+  /** Present on 'done' chunks for chat calls — drives the message counter */
+  quota?: QuotaInfo;
 };
 
 export type AskOptions = {
@@ -34,6 +47,10 @@ export type AskOptions = {
   /** Override the default Haiku model */
   model?: string;
   maxTokens?: number;
+  /** Quota path on the server: 'chat' (message quota), 'custom_shop' (run ticket), 'memory' (Pro-only) */
+  purpose?: 'chat' | 'custom_shop' | 'memory';
+  /** Single-run ticket from custom-shop-gate — required when purpose is 'custom_shop' */
+  ticket?: string;
 };
 
 // Haiku: Advisor chat and quick analysis calls (~15x cheaper than Sonnet)
@@ -97,10 +114,27 @@ export async function askClaude(
         model: options.model ?? HAIKU,
         ...(options.maxTokens ? { maxTokens: options.maxTokens } : {}),
         ...(options.enableWebSearch ? { enableWebSearch: true } : {}),
+        ...(options.purpose ? { purpose: options.purpose } : {}),
+        ...(options.ticket ? { ticket: options.ticket } : {}),
       }),
     });
 
     if (!response.ok) {
+      // 403/402 carry a gate code the UI needs (paywall vs. depleted warning)
+      if (response.status === 403 || response.status === 402) {
+        let code: StreamChunk['code'];
+        try {
+          const errBody = await response.json();
+          if (errBody.error === 'pro_required') code = 'pro_required';
+          else if (errBody.error === 'messages_depleted') code = 'messages_depleted';
+        } catch { /* fall through to generic error */ }
+        if (code) {
+          onChunk({ type: 'error', code, error: code === 'pro_required'
+            ? 'Free message limit reached.'
+            : 'Monthly message allotment depleted.' });
+          return;
+        }
+      }
       onChunk({ type: 'error', error: 'Unable to reach the AI service. Please try again.' });
       return;
     }
@@ -108,7 +142,7 @@ export async function askClaude(
     const data = await response.json();
     const text = extractTextFromContent(data.content ?? []);
     if (text) onChunk({ type: 'text', text });
-    onChunk({ type: 'done' });
+    onChunk({ type: 'done', quota: data.quota });
   } catch {
     onChunk({ type: 'error', error: 'An unexpected error occurred. Please try again.' });
   }
@@ -137,6 +171,8 @@ export async function askClaudeOnce(
         model: options.model ?? HAIKU,
         ...(options.maxTokens ? { maxTokens: options.maxTokens } : {}),
         ...(options.enableWebSearch ? { enableWebSearch: true } : {}),
+        ...(options.purpose ? { purpose: options.purpose } : {}),
+        ...(options.ticket ? { ticket: options.ticket } : {}),
       }),
     });
 

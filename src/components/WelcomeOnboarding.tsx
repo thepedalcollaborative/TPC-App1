@@ -28,6 +28,9 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useNavigation } from '@react-navigation/native';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { RootStackParamList } from '../types/navigation';
 import { colors, typography, spacing, radius, gradients } from '../theme';
 
 const tpcLogo = require('../../assets/splash-icon.png');
@@ -470,6 +473,7 @@ const hookVisual = StyleSheet.create({
 export function WelcomeOnboarding({ onGetStarted, onSignIn }: WelcomeOnboardingProps) {
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const flatRef = useRef<FlatList>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const slides = buildSlides();
@@ -577,6 +581,27 @@ export function WelcomeOnboarding({ onGetStarted, onSignIn }: WelcomeOnboardingP
           <Text style={styles.signInText}>Already have an account? </Text>
           <Text style={styles.signInLink}>Sign In</Text>
         </TouchableOpacity>
+
+        {/* Legal consent — only on last slide */}
+        {activeIndex === total - 1 && (
+          <Text style={styles.legalConsent}>
+            {'By continuing, you agree to our '}
+            <Text
+              style={styles.legalLink}
+              onPress={() => navigation.navigate('Legal', { tab: 'terms' })}
+            >
+              Terms of Service
+            </Text>
+            {' and '}
+            <Text
+              style={styles.legalLink}
+              onPress={() => navigation.navigate('Legal', { tab: 'privacy' })}
+            >
+              Privacy Policy
+            </Text>
+            {'.'}
+          </Text>
+        )}
       </View>
     </View>
   );
@@ -671,6 +696,21 @@ const styles = StyleSheet.create({
     fontSize: typography.sizes.sm,
     fontFamily: typography.bodySemiBold,
     color: colors.teal,
+  },
+  legalConsent: {
+    fontSize: 11,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+    textAlign: 'center',
+    marginTop: spacing.sm,
+    lineHeight: 16,
+    paddingHorizontal: spacing.md,
+  },
+  legalLink: {
+    fontSize: 11,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textMuted,
+    textDecorationLine: 'underline',
   },
 });
 

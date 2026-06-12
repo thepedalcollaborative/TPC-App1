@@ -1,19 +1,17 @@
 /**
  * useMessageGate
  *
- * Wraps the check-and-gate-message edge function.
- * Call checkGate() before each advisor message send.
- * Returns the current gate state for rendering a MessageCounter.
+ * Holds the advisor message-counter state. Quota is now enforced and
+ * consumed server-side inside the tpc-advisor edge function (closing the
+ * bypass where a modified client skipped the old check-and-gate-message
+ * pre-check). The client just renders whatever quota the server returns:
+ * call applyQuota() with the `quota` object from each advisor response.
  */
 
 import { useState, useCallback } from 'react';
-import { invokeEdgeFunction } from '../lib/supabase';
+import type { QuotaInfo } from '../lib/anthropic';
 
 export type GateError = 'pro_required' | 'messages_depleted' | 'network_error';
-
-export type GateResult =
-  | { allowed: true;  usedCredit?: boolean; used?: number; allotment?: number; credits?: number }
-  | { allowed: false; error: GateError };
 
 export type GateState = {
   used: number;
@@ -21,55 +19,43 @@ export type GateState = {
   credits: number;
   /** true when used >= allotment (falling back to credits) */
   onCredits: boolean;
+  /** set for free-tier users instead of used/allotment */
+  freeUsed?: number;
+  freeAllotment?: number;
 };
 
 export function useMessageGate() {
   const [gateState, setGateState] = useState<GateState | null>(null);
 
-  const checkGate = useCallback(async (): Promise<GateResult> => {
-    try {
-      const { data, error } = await invokeEdgeFunction<Record<string, unknown>>(
-        'check-and-gate-message',
-        {}
-      );
+  const applyQuota = useCallback((quota: QuotaInfo | undefined) => {
+    if (!quota) return;
 
-      if (error) {
-        // Parse HTTP error status from Supabase Functions error shape
-        const status = (error as { context?: { status?: number } }).context?.status;
-        if (status === 403) return { allowed: false, error: 'pro_required' };
-        if (status === 402) return { allowed: false, error: 'messages_depleted' };
-        return { allowed: false, error: 'network_error' };
-      }
-
-      if (!data) return { allowed: false, error: 'network_error' };
-
-      if (!data.allowed) {
-        const err = (data.error as string) ?? 'network_error';
-        return { allowed: false, error: err as GateError };
-      }
-
-      // Update local gate state for the counter UI
-      if (data.used_credit) {
-        setGateState(prev => ({
-          used: prev?.used ?? 50,
-          allotment: prev?.allotment ?? 50,
-          credits: typeof data.credits === 'number' ? data.credits : 0,
-          onCredits: true,
-        }));
-      } else {
-        setGateState({
-          used: typeof data.used === 'number' ? data.used : 0,
-          allotment: typeof data.allotment === 'number' ? data.allotment : 50,
-          credits: typeof data.credits === 'number' ? data.credits : 0,
-          onCredits: false,
-        });
-      }
-
-      return { allowed: true };
-    } catch {
-      return { allowed: false, error: 'network_error' };
+    if (quota.used_credit) {
+      setGateState(prev => ({
+        used: prev?.used ?? 50,
+        allotment: prev?.allotment ?? 50,
+        credits: typeof quota.credits === 'number' ? quota.credits : 0,
+        onCredits: true,
+      }));
+    } else if (quota.free_used != null) {
+      // Free tier
+      setGateState({
+        used: 0,
+        allotment: 0,
+        credits: 0,
+        onCredits: false,
+        freeUsed: quota.free_used,
+        freeAllotment: typeof quota.free_allotment === 'number' ? quota.free_allotment : 3,
+      });
+    } else {
+      setGateState({
+        used: typeof quota.used === 'number' ? quota.used : 0,
+        allotment: typeof quota.allotment === 'number' ? quota.allotment : 50,
+        credits: typeof quota.credits === 'number' ? quota.credits : 0,
+        onCredits: false,
+      });
     }
   }, []);
 
-  return { checkGate, gateState };
+  return { gateState, applyQuota };
 }

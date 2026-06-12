@@ -37,7 +37,7 @@ import {
 } from '../lib/subscription';
 import { useStore } from '../hooks/useStore';
 
-export type PaywallReason = 'advisor' | 'custom_shop' | 'boards' | 'weekly_pick' | 'general';
+export type PaywallReason = 'advisor' | 'custom_shop' | 'boards' | 'weekly_pick' | 'scan' | 'general';
 
 const tpcSquare = require('../../assets/tpc-square.png');
 
@@ -58,6 +58,10 @@ const HERO_COPY: Record<PaywallReason, { headline: string; sub: string }> = {
     headline: "Your weekly pick is in.",
     sub:      "Pro members get a fresh AI recommendation every week.",
   },
+  scan: {
+    headline: "Point, shoot, cataloged.",
+    sub:      "You've used your free scans. Go Pro for unlimited AI pedal recognition.",
+  },
   general: {
     headline: "Unlock everything.",
     sub:      "Get the most out of TPC with unlimited AI, boards, and weekly picks.",
@@ -67,6 +71,7 @@ const HERO_COPY: Record<PaywallReason, { headline: string; sub: string }> = {
 const FEATURES = [
   { icon: 'sparkles-outline',           text: 'Unlimited Custom Shop expert picks' },
   { icon: 'chatbubble-ellipses-outline', text: 'Unlimited AI Advisor sessions' },
+  { icon: 'camera-outline',             text: 'Unlimited scan-to-add pedal recognition' },
   { icon: 'albums-outline',             text: 'Unlimited pedalboards' },
   { icon: 'refresh-outline',            text: 'Weekly AI sound recommendations' },
   { icon: 'flash-outline',              text: 'Early access to new features' },

@@ -71,7 +71,7 @@ export default function AdvisorScreen() {
   const { session, ownedPedals, wishlistPedals, retiredPedals, boards, profile, openPaywall, weeklyPick, weeklyPickLoading, fetchWeeklyPick, addToWishlist } = useStore();
 
   const isPro = Boolean(profile?.is_premium) || hasBetaFullAccess();
-  const { checkGate, gateState } = useMessageGate();
+  const { gateState, applyQuota } = useMessageGate();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
@@ -284,28 +284,9 @@ export default function AdvisorScreen() {
     scrollToBottom();
     Haptics.selectionAsync();
 
-    // ── Usage gate (server-side) ─────────────────────────────────────────────
-    if (!hasBetaFullAccess()) {
-      const gate = await checkGate();
-      if (!gate.allowed) {
-        // Undo the optimistic UI and restore the draft
-        setMessages(prev => prev.filter(m => m.id !== userMessage.id));
-        setInput(text.trim());
-        setIsThinking(false);
-        isSubmittingRef.current = false;
-        if (gate.error === 'pro_required') {
-          openPaywall('advisor');
-          return;
-        } else if (gate.error === 'messages_depleted') {
-          setSessionWarning("You've used all 100 messages this month and have no bonus credits left.");
-          return;
-        }
-        // network_error: fail open — UI restored so user can retry manually
-        return;
-      }
-    }
+    // Quota is enforced server-side inside tpc-advisor itself — a 403/402
+    // comes back on the send and is handled in the error chunk below.
     setSessionWarning(null);
-    // ────────────────────────────────────────────────────────────────────────
 
     // Build history from the ref so queue-drain calls always get up-to-date context.
     // Keep image content blocks intact so Claude sees the image; only drop base64
@@ -359,6 +340,7 @@ export default function AdvisorScreen() {
           )
         );
         setIsThinking(false);
+        if (chunk.quota) applyQuota(chunk.quota);
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         scrollToBottom();
 
@@ -391,6 +373,22 @@ export default function AdvisorScreen() {
 
         drainQueue();
       } else if (chunk.type === 'error') {
+        // Server-side quota rejection — undo the optimistic UI entirely,
+        // restore the draft, and drop any queued sends (they'd all fail too).
+        if (chunk.code === 'pro_required' || chunk.code === 'messages_depleted') {
+          setMessages(prev => prev.filter(m => m.id !== assistantId && m.id !== userMessage.id));
+          setInput(text.trim());
+          setIsThinking(false);
+          isSubmittingRef.current = false;
+          messageQueue.current = [];
+          setQueuedCount(0);
+          if (chunk.code === 'pro_required') {
+            openPaywall('advisor');
+          } else {
+            setSessionWarning("You've used all your messages this month and have no bonus credits left.");
+          }
+          return;
+        }
         const classified = classifyError(chunk.error);
         const errorContent = classified.type === 'offline'
           ? "You appear to be offline — reconnect and try again."
@@ -408,7 +406,7 @@ export default function AdvisorScreen() {
         drainQueue();
       }
     }, { enableWebSearch: true, maxTokens: 1400 });
-  }, [ownedPedals, wishlistPedals, retiredPedals, profile, boards, isPro, openPaywall, scrollToBottom, session, systemPrompt, checkGate]);
+  }, [ownedPedals, wishlistPedals, retiredPedals, profile, boards, isPro, openPaywall, scrollToBottom, session, systemPrompt, applyQuota]);
 
   // Keep the ref current so drainQueue can always call the latest version
   useEffect(() => { sendMessageRef.current = sendMessage; }, [sendMessage]);
@@ -487,13 +485,15 @@ export default function AdvisorScreen() {
       </LinearGradient>
 
       {/* Message counter — shown once user has sent at least one message */}
-      {isPro && !hasBetaFullAccess() && gateState && (
+      {!hasBetaFullAccess() && gateState && (
         <View style={styles.counterBar}>
           <Ionicons name="chatbubble-ellipses-outline" size={12} color={colors.textMuted} />
           <Text style={styles.counterText}>
-            {gateState.onCredits
-              ? `Monthly limit reached · ${gateState.credits} bonus credit${gateState.credits !== 1 ? 's' : ''} remaining`
-              : `${gateState.used} of ${gateState.allotment} messages this month${gateState.credits > 0 ? ` · +${gateState.credits} bonus` : ''}`}
+            {!isPro && gateState.freeUsed != null
+              ? `${gateState.freeUsed} of ${gateState.freeAllotment ?? 3} free messages used`
+              : gateState.onCredits
+                ? `Monthly limit reached · ${gateState.credits} bonus credit${gateState.credits !== 1 ? 's' : ''} remaining`
+                : `${gateState.used} of ${gateState.allotment} messages this month${gateState.credits > 0 ? ` · +${gateState.credits} bonus` : ''}`}
           </Text>
         </View>
       )}
@@ -747,6 +747,22 @@ function MessageBubble({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Long-press a user message to copy its text (assistant messages have a Copy button).
+  const handleLongPressCopy = () => {
+    const txt = getMessageText(message.content).trim();
+    if (!txt) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    Clipboard.setStringAsync(txt);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const userText = isUser
+    ? (typeof message.content === 'string'
+        ? message.content
+        : (message.content as ContentBlock[]).find(b => b.type === 'text')?.text ?? '')
+    : '';
+
   return (
     <View style={[styles.bubbleRow, isUser && styles.bubbleRowUser]}>
       {!isUser && (
@@ -755,36 +771,42 @@ function MessageBubble({
         </View>
       )}
       <View style={styles.bubbleWithShare}>
-        <View
-          style={[
-            styles.bubble,
-            isUser ? styles.bubbleUser : styles.bubbleAssistant,
-            message.isStreaming && styles.bubbleStreaming,
-          ]}
-        >
-          {isUser ? (
-            <>
-              {message.imageUri && (
-                <Image
-                  source={{ uri: message.imageUri }}
-                  style={styles.bubbleImage}
-                  resizeMode="cover"
-                />
-              )}
-              {(() => {
-                const txt = typeof message.content === 'string'
-                  ? message.content
-                  : (message.content as ContentBlock[]).find(b => b.type === 'text')?.text ?? '';
-                return txt ? <Text style={styles.bubbleTextUser}>{txt}</Text> : null;
-              })()}
-            </>
-          ) : (
+        {isUser ? (
+          <TouchableOpacity
+            activeOpacity={0.7}
+            onLongPress={handleLongPressCopy}
+            delayLongPress={300}
+            style={[styles.bubble, styles.bubbleUser]}
+          >
+            {message.imageUri && (
+              <Image
+                source={{ uri: message.imageUri }}
+                style={styles.bubbleImage}
+                resizeMode="cover"
+              />
+            )}
+            {userText ? <Text style={styles.bubbleTextUser}>{userText}</Text> : null}
+          </TouchableOpacity>
+        ) : (
+          <View
+            style={[
+              styles.bubble,
+              styles.bubbleAssistant,
+              message.isStreaming && styles.bubbleStreaming,
+            ]}
+          >
             <FormattedText
               text={typeof message.content === 'string' ? message.content : ''}
               isStreaming={message.isStreaming}
             />
-          )}
-        </View>
+          </View>
+        )}
+        {isUser && copied && (
+          <View style={styles.bubbleUserCopiedRow}>
+            <Ionicons name="checkmark" size={13} color={colors.teal} />
+            <Text style={[styles.bubbleShareText, styles.bubbleCopiedText]}>Copied</Text>
+          </View>
+        )}
         {(showShare || showCopy) && (
           <View style={styles.bubbleActionsRow}>
             {showCopy && (
@@ -1223,6 +1245,14 @@ const styles = StyleSheet.create({
   },
   bubbleCopiedText: {
     color: colors.teal,
+  },
+  bubbleUserCopiedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    alignSelf: 'flex-end',
+    paddingRight: spacing.xs,
+    paddingVertical: 2,
   },
   bubbleRowUser: {
     flexDirection: 'row-reverse',

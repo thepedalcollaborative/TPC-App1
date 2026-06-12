@@ -50,6 +50,8 @@ import AIHubScreen from './src/screens/AIHubScreen';
 import VideosScreen from './src/screens/VideosScreen';
 import GearHistoryScreen from './src/screens/GearHistoryScreen';
 import ChatHistoryScreen from './src/screens/ChatHistoryScreen';
+import LegalScreen from './src/screens/LegalScreen';
+import PublicProfileScreen from './src/screens/PublicProfileScreen';
 
 // Defensive wrapper — prevents crash if native module isn't linked in Expo Go
 try { SplashScreen.preventAutoHideAsync(); } catch { /* no-op */ }
@@ -306,6 +308,15 @@ export default function App() {
   // the query string. We process whichever we get.
   useEffect(() => {
     const handleUrl = async (url: string) => {
+      // Public profile deep link: tpc://profile/username
+      if (url.startsWith('tpc://profile/')) {
+        const username = url.replace('tpc://profile/', '').split('?')[0].trim();
+        if (username && navigationRef.current?.isReady()) {
+          (navigationRef.current as any).navigate('PublicProfile', { username });
+        }
+        return;
+      }
+
       if (!url.startsWith('tpc://auth-callback')) return;
 
       // Email verification → hash fragment: #access_token=...&refresh_token=...
@@ -541,6 +552,16 @@ export default function App() {
         <Stack.Screen
           name="ChatHistory"
           component={ChatHistoryScreen}
+          options={{ animation: 'slide_from_right', gestureEnabled: true }}
+        />
+        <Stack.Screen
+          name="Legal"
+          component={LegalScreen}
+          options={{ animation: 'slide_from_right', gestureEnabled: true }}
+        />
+        <Stack.Screen
+          name="PublicProfile"
+          component={PublicProfileScreen}
           options={{ animation: 'slide_from_right', gestureEnabled: true }}
         />
       </Stack.Navigator>

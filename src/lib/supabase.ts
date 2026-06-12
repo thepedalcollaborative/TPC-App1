@@ -271,6 +271,8 @@ export type UserProfile = {
   pro_source?: string | null;
   pedal_finder_uses_today: number;
   pedal_expert_profile: FullExpertProfile | null;
+  allow_activity_in_trends: boolean;
+  is_public_profile: boolean;
   created_at: string;
 };
 

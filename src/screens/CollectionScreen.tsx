@@ -145,21 +145,40 @@ const dateFieldStyles = StyleSheet.create({
 });
 
 const CATEGORIES = [
+  // Drive family
   'drive',
+  'fuzz',
+  'distortion',
   'boost',
+  // Dynamics & control
   'compressor',
+  'volume',
+  'noisegate',
+  'buffer',
+  // Tone shaping
   'eq',
+  'wah',
+  'preamp',
+  // Time-based
   'delay',
   'reverb',
+  // Modulation
+  'chorus',
+  'phaser',
+  'flanger',
+  'tremolo',
   'modulation',
-  'looper',
+  // Pitch & octave
   'pitch',
-  'utility',
+  'octave',
+  // Other
+  'looper',
   'ambient',
   'synth',
-  'other',
   'multifx',
   'modeler',
+  'utility',
+  'other',
 ];
 
 type PedalSearchLocalResponse = {
@@ -194,7 +213,7 @@ export default function CollectionScreen() {
   const insets = useSafeAreaInsets();
   const route = useRoute<RouteProp<TabParamList, 'Vault'>>();
   const navigation = useNavigation<NavigationProp<TabParamList>>();
-  const { session, profile, ownedPedals, wishlistPedals, retiredPedals, listedPedals, totalInvested, totalMarketValue, marketValues, fetchPedals, userImageUrls, userImageThumbUrls, refreshUserImages, viewMode, boards, updateListingStatus, wifeMode } = useStore();
+  const { session, profile, ownedPedals, wishlistPedals, retiredPedals, listedPedals, totalInvested, totalMarketValue, marketValues, fetchPedals, userImageUrls, userImageThumbUrls, refreshUserImages, viewMode, boards, updateListingStatus, wifeMode, openPaywall } = useStore();
   const { fmt, fmtDelta } = useFormatMoney();
 
   const [activeTab, setActiveTab] = useState<'owned' | 'wishlist' | 'listed'>('owned');
@@ -205,6 +224,8 @@ export default function CollectionScreen() {
   // then opens AddPedalModal with the identified query pre-filled.
   const [isScanningMain, setIsScanningMain] = useState(false);
   const [scanInitialSearch, setScanInitialSearch] = useState<string | null>(null);
+  // When true, AddPedalModal opens directly to the manual-add form (scan failed).
+  const [scanOpenManual, setScanOpenManual] = useState(false);
 
   // Share nudge — shown briefly after an owned pedal is added
   const [shareNudge, setShareNudge] = useState<{ brand: string; model: string } | null>(null);
@@ -257,18 +278,32 @@ export default function CollectionScreen() {
         if (reopenModalAfterScan.current) { reopenModalAfterScan.current = false; setShowAddModal(true); }
         return;
       }
+      // 1568px is Claude vision's max useful long edge; 0.8 keeps small label
+      // text legible. Payload is ~3x larger than the old 800px/0.65 but still
+      // well under edge function body limits (~1MB base64 typical).
       const processed = await ImageManipulator.manipulateAsync(
         result.assets[0].uri,
-        [{ resize: { width: 800 } }],
-        { compress: 0.65, format: ImageManipulator.SaveFormat.JPEG }
+        [{ resize: { width: 1568 } }],
+        { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
       );
       const base64 = await FileSystem.readAsStringAsync(processed.uri, { encoding: 'base64' });
       const { data, error } = await invokeEdgeFunction<{ brand: string; model: string }>('scan-pedal', {
         imageBase64: base64, mediaType: 'image/jpeg',
       });
+      // 403 = free scan quota exhausted → paywall, not the manual-add fallback
+      if (error) {
+        const status = (error as { context?: { status?: number } }).context?.status;
+        if (status === 403) {
+          setTimeout(() => openPaywall('scan'), 600);
+          return;
+        }
+      }
       if (error || !data?.brand) {
-        Alert.alert("Couldn't identify", "Try a clearer photo or search manually.");
-        if (reopenModalAfterScan.current) { reopenModalAfterScan.current = false; setShowAddModal(true); }
+        setScanOpenManual(true);
+        setTimeout(() => {
+          setShowAddModal(true);
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        }, 600);
         return;
       }
       const query = `${data.brand} ${data.model}`.trim();
@@ -282,13 +317,13 @@ export default function CollectionScreen() {
       }, 600);
     } catch (e) {
       console.error('[Scan]', e);
-      Alert.alert('Scan failed', 'Something went wrong. Try searching manually.');
-      if (reopenModalAfterScan.current) { setShowAddModal(true); }
+      setScanOpenManual(true);
+      setTimeout(() => setShowAddModal(true), 600);
     } finally {
       setIsScanningMain(false);
       reopenModalAfterScan.current = false;
     }
-  }, []);
+  }, [openPaywall]);
 
   // The single "Add a Pedal" button — shows three paths.
   const handleAddPedalPress = useCallback(() => {
@@ -1077,10 +1112,10 @@ export default function CollectionScreen() {
       }
     }
     const result = useCamera
-      ? await ImagePicker.launchCameraAsync({ allowsEditing: true, quality: 0.85 })
+      ? await ImagePicker.launchCameraAsync({ allowsEditing: false, quality: 0.85 })
       : await ImagePicker.launchImageLibraryAsync({
           mediaTypes: ImagePicker.MediaTypeOptions.Images,
-          allowsEditing: true,
+          allowsEditing: false,
           quality: 0.85,
         });
     if (result.canceled || !result.assets?.[0]?.uri) {
@@ -1770,16 +1805,18 @@ export default function CollectionScreen() {
       {/* ── Add Pedal Modal ── */}
       <AddPedalModal
         visible={showAddModal}
-        onClose={() => { setShowAddModal(false); setScanInitialSearch(null); }}
+        onClose={() => { setShowAddModal(false); setScanInitialSearch(null); setScanOpenManual(false); }}
         onAdded={(brand, model, isOwned) => {
           setShowAddModal(false);
           setScanInitialSearch(null);
+          setScanOpenManual(false);
           fetchPedals();
           if (isOwned && brand && model) showShareNudge(brand, model);
         }}
         session={session}
         defaultTab={activeTab}
         initialSearch={scanInitialSearch}
+        openManual={scanOpenManual}
       />
 
       {/* ── Pedal Detail Modal ── */}
@@ -3222,6 +3259,7 @@ type AddPedalModalProps = {
   session: Session | null;
   defaultTab: 'owned' | 'wishlist' | 'listed';
   initialSearch?: string | null;
+  openManual?: boolean;
 };
 
 type ReverbResult = {
@@ -3234,7 +3272,7 @@ type ReverbResult = {
   pedal_id: string | null;
 };
 
-function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initialSearch }: AddPedalModalProps) {
+function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initialSearch, openManual }: AddPedalModalProps) {
   const ownedPedals = useStore(s => s.ownedPedals);
   const profile = useStore(s => s.profile);
   const { fmt } = useFormatMoney();
@@ -3274,6 +3312,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
   const [manualBrand, setManualBrand] = useState('');
   const [manualModel, setManualModel] = useState('');
   const [manualCategory, setManualCategory] = useState('drive');
+  const [manualPhotoUri, setManualPhotoUri] = useState<string | null>(null);
   const [isUpsertingManual, setIsUpsertingManual] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Track whether the keyboard is currently visible so handleClose can decide
@@ -3295,6 +3334,13 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
       }
     }
   }, [defaultTab, visible]);
+
+  // When opened after a failed scan, jump straight to the manual-add form
+  useEffect(() => {
+    if (visible && openManual) {
+      setShowManualAdd(true);
+    }
+  }, [visible, openManual]);
 
   const tradeSuggestions = useMemo(() => {
     const q = tradeQuery.trim().toLowerCase();
@@ -3475,8 +3521,6 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   };
 
-  const FREE_VAULT_LIMIT = 10;
-
   const handleAddFlow = async () => {
     if (!selectedPedal) {
       setAddError('Select a pedal to continue.');
@@ -3506,12 +3550,6 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
       }
 
     const status = acquisitionType === 'wishlist' ? 'wishlist' : 'owned';
-
-    // Free tier vault cap
-    if (status === 'owned' && !profile?.is_premium && !hasBetaFullAccess() && ownedPedals.length >= FREE_VAULT_LIMIT) {
-      setAddError(`Free accounts are limited to ${FREE_VAULT_LIMIT} pedals. Upgrade to Pro for unlimited vault access.`);
-      return;
-    }
 
     setIsAdding(true);
     setAddError('');
@@ -3560,7 +3598,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
         });
         if (rpcError) error = rpcError;
       } else {
-        const { error: insertError } = await supabase.from('user_pedals').insert({
+        const { data: inserted, error: insertError } = await supabase.from('user_pedals').insert({
           user_id: liveSession.user.id,
           pedal_id: selectedPedal.id,
           colorway_id: status === 'owned' ? (selectedColorwayId ?? null) : null,
@@ -3572,8 +3610,33 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
           acquired_from: acquisitionType === 'bought' ? (acquiredFrom.trim() || null) : null,
           notes: status === 'owned' ? acquiredNotesFinal : null,
           category_override: status === 'owned' ? (categoryOverride ?? null) : null,
-        });
+        }).select('id').single();
         if (insertError) error = insertError;
+
+        // Upload photo captured during manual add (non-fatal if it fails)
+        if (!insertError && inserted?.id && manualPhotoUri) {
+          try {
+            const userId = liveSession.user.id;
+            const basePath = `${userId}/pedals/${inserted.id}/${Date.now()}`;
+            const [fullAsset, thumbAsset] = await Promise.all([
+              ImageManipulator.manipulateAsync(manualPhotoUri, [{ resize: { width: 1400 } }], { compress: 0.82, format: ImageManipulator.SaveFormat.JPEG }),
+              ImageManipulator.manipulateAsync(manualPhotoUri, [{ resize: { width: 360 } }],  { compress: 0.75, format: ImageManipulator.SaveFormat.JPEG }),
+            ]);
+            const [fullBuf, thumbBuf] = await Promise.all([
+              fetch(fullAsset.uri).then(r => r.arrayBuffer()),
+              fetch(thumbAsset.uri).then(r => r.arrayBuffer()),
+            ]);
+            const path = `${basePath}.jpg`;
+            const thumbPath = `${basePath}_sm.jpg`;
+            await Promise.all([
+              supabase.storage.from('user-pedal-photos').upload(path,      fullBuf,  { upsert: false, contentType: 'image/jpeg', cacheControl: '31536000' }),
+              supabase.storage.from('user-pedal-photos').upload(thumbPath, thumbBuf, { upsert: false, contentType: 'image/jpeg', cacheControl: '31536000' }),
+            ]);
+            await supabase.from('user_pedals').update({ user_image_path: path }).eq('id', inserted.id);
+          } catch {
+            // Non-fatal — pedal was added, photo upload failed silently
+          }
+        }
       }
 
       if (error) {
@@ -3620,6 +3683,32 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
       onAdded(selectedPedal?.brand, selectedPedal?.model, false); // retired — no owned share nudge
       handleClose();
     }
+  };
+
+  const pickManualPhoto = async (source: 'camera' | 'library') => {
+    if (source === 'camera') {
+      const { granted } = await ImagePicker.requestCameraPermissionsAsync();
+      if (!granted) return;
+      const r = await ImagePicker.launchCameraAsync({ allowsEditing: false, quality: 0.85 });
+      if (!r.canceled && r.assets?.[0]?.uri) setManualPhotoUri(r.assets[0].uri);
+    } else {
+      const { granted } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!granted) return;
+      const r = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: false,
+        quality: 0.85,
+      });
+      if (!r.canceled && r.assets?.[0]?.uri) setManualPhotoUri(r.assets[0].uri);
+    }
+  };
+
+  const promptManualPhoto = () => {
+    Alert.alert('Add Photo', 'Choose a source', [
+      { text: 'Take Photo', onPress: () => pickManualPhoto('camera') },
+      { text: 'Photo Library', onPress: () => pickManualPhoto('library') },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
   };
 
   const handleManualUpsert = async () => {
@@ -3680,6 +3769,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
       setManualBrand('');
       setManualModel('');
       setManualCategory('drive');
+      setManualPhotoUri(null);
       onClose();
     };
 
@@ -4042,6 +4132,22 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
                 </View>
               )}
 
+              {acquisitionType && acquisitionType !== 'wishlist' && (
+                <View style={styles.addFieldGroup}>
+                  <Text style={styles.fieldLabel}>Photo</Text>
+                  <TouchableOpacity style={styles.manualPhotoBtn} onPress={promptManualPhoto} activeOpacity={0.7}>
+                    {manualPhotoUri ? (
+                      <Image source={{ uri: manualPhotoUri }} style={styles.manualPhotoThumb} />
+                    ) : (
+                      <>
+                        <Ionicons name="camera-outline" size={18} color={colors.teal} />
+                        <Text style={styles.manualPhotoBtnText}>Add Photo (optional)</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              )}
+
               {addError ? (
                 <Text style={styles.addError}>{addError}</Text>
               ) : null}
@@ -4110,6 +4216,12 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
 
               {showManualAdd && (
                 <View style={styles.manualAddForm}>
+                  {openManual && (
+                    <View style={styles.scanFailBanner}>
+                      <Ionicons name="alert-circle-outline" size={14} color={colors.warning} />
+                      <Text style={styles.scanFailBannerText}>Couldn't identify that pedal — enter it manually</Text>
+                    </View>
+                  )}
                   <Text style={styles.manualAddLabel}>Add to catalog</Text>
                   <TextInput
                     style={styles.manualInput}
@@ -4145,6 +4257,16 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
                       </TouchableOpacity>
                     ))}
                   </ScrollView>
+                  <TouchableOpacity style={styles.manualPhotoBtn} onPress={promptManualPhoto} activeOpacity={0.7}>
+                    {manualPhotoUri ? (
+                      <Image source={{ uri: manualPhotoUri }} style={styles.manualPhotoThumb} />
+                    ) : (
+                      <>
+                        <Ionicons name="camera-outline" size={18} color={colors.teal} />
+                        <Text style={styles.manualPhotoBtnText}>Add Photo (optional)</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
                   <View style={styles.addButtons}>
                     <TouchableOpacity
                       style={[styles.addBtn, { backgroundColor: colors.border }]}
@@ -5273,6 +5395,45 @@ const styles = StyleSheet.create({
     fontSize: typography.sizes.base,
     fontFamily: typography.body,
     color: colors.textPrimary,
+  },
+  manualPhotoBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.teal + '60',
+    borderStyle: 'dashed',
+    backgroundColor: colors.teal + '08',
+    overflow: 'hidden',
+    minHeight: 44,
+  },
+  manualPhotoThumb: {
+    width: '100%',
+    height: 140,
+    borderRadius: radius.lg,
+    resizeMode: 'cover',
+  },
+  manualPhotoBtnText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.teal,
+  },
+  scanFailBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.warning + '18',
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
+  },
+  scanFailBannerText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.body,
+    color: colors.warning,
+    flex: 1,
   },
   searchHint: {
     fontSize: typography.sizes.sm,

@@ -7,10 +7,10 @@ import {
   TouchableOpacity,
   Image,
   Modal,
-  Linking,
   ActivityIndicator,
   Alert,
 } from 'react-native';
+import { WebView } from 'react-native-webview';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -33,11 +33,19 @@ import { HiddenShareCard } from '../components/ShareCard';
 import { useShareCard } from '../lib/useShareCard';
 import { hasBetaFullAccess } from '../lib/subscription';
 import { supabase, UserProfile, invokeEdgeFunction } from '../lib/supabase';
-import { reverbSearchUrl } from '../lib/reverb';
 import { weeklyPickCountdownLabel } from '../lib/notifications';
 import { useFormatMoney } from '../hooks/useFormatMoney';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+interface TrendingPedal {
+  pedal_id: string;
+  brand: string;
+  model: string;
+  image_url: string | null;
+  category: string | null;
+  week_adds: number;
+}
+
 interface LatestVideo {
   id: string;
   title: string;
@@ -426,6 +434,8 @@ export default function HomeScreen() {
 
   const [showWeeklyDetail, setShowWeeklyDetail] = useState(false);
   const [weeklyWishlistState, setWeeklyWishlistState] = useState<'idle' | 'loading' | 'added' | 'exists'>('idle');
+  const [trendingPedals, setTrendingPedals] = useState<TrendingPedal[]>([]);
+  const [trendingWishlistStates, setTrendingWishlistStates] = useState<Record<string, 'idle' | 'loading' | 'added' | 'exists'>>({});
   const [showVaultSnapshot, setShowVaultSnapshot] = useState(false);
   const [latestVideo, setLatestVideo] = useState<LatestVideo | null>(null);
   const isPro     = Boolean(profile?.is_premium) || hasBetaFullAccess();
@@ -518,6 +528,16 @@ export default function HomeScreen() {
     }).catch(() => {});
     return () => { mounted = false; };
   }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    let mounted = true;
+    void supabase.rpc('get_trending_pedals', { limit_count: 5 }).then(({ data }) => {
+      if (!mounted || !data) return;
+      setTrendingPedals(data as TrendingPedal[]);
+    });
+    return () => { mounted = false; };
+  }, [session]);
 
   const navigateToFinder = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -688,6 +708,71 @@ export default function HomeScreen() {
             </TouchableOpacity>
           )}
 
+          {/* ── Trending in the Community ── */}
+          {trendingPedals.length > 0 && (
+            <View style={styles.trendingSection}>
+              <View style={styles.trendingHeader}>
+                <Ionicons name="flame-outline" size={14} color={colors.rose} />
+                <Text style={styles.trendingHeaderText}>TRENDING THIS WEEK</Text>
+              </View>
+              {trendingPedals.map((pedal) => {
+                const wishState = trendingWishlistStates[pedal.pedal_id] ?? 'idle';
+                return (
+                  <View key={pedal.pedal_id} style={styles.trendingRow}>
+                    {pedal.image_url ? (
+                      <Image source={{ uri: pedal.image_url }} style={styles.trendingThumb} resizeMode="contain" />
+                    ) : (
+                      <View style={[styles.trendingThumb, styles.trendingThumbPlaceholder]}>
+                        <Ionicons name="hardware-chip-outline" size={18} color={colors.textMuted} />
+                      </View>
+                    )}
+                    <View style={styles.trendingInfo}>
+                      <Text style={styles.trendingPedalName} numberOfLines={1}>
+                        {pedal.brand} {pedal.model}
+                      </Text>
+                      <Text style={styles.trendingCount}>
+                        {pedal.week_adds} member{pedal.week_adds === 1 ? '' : 's'} added this
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      style={[
+                        styles.trendingWishlistBtn,
+                        wishState !== 'idle' && styles.trendingWishlistBtnDone,
+                      ]}
+                      activeOpacity={0.75}
+                      disabled={wishState !== 'idle'}
+                      onPress={async () => {
+                        Haptics.selectionAsync();
+                        setTrendingWishlistStates(prev => ({ ...prev, [pedal.pedal_id]: 'loading' }));
+                        const result = await addToWishlist(pedal.brand, pedal.model, {
+                          category: pedal.category ?? 'other',
+                          subcategory: 'Trending',
+                          description: '',
+                          analog: false,
+                          price: null,
+                        });
+                        setTrendingWishlistStates(prev => ({
+                          ...prev,
+                          [pedal.pedal_id]: result === 'added' ? 'added' : result === 'exists' ? 'exists' : 'idle',
+                        }));
+                      }}
+                    >
+                      {wishState === 'loading' ? (
+                        <ActivityIndicator size="small" color={colors.teal} />
+                      ) : wishState === 'added' ? (
+                        <Ionicons name="checkmark-circle" size={20} color={colors.teal} />
+                      ) : wishState === 'exists' ? (
+                        <Ionicons name="checkmark-circle" size={20} color={colors.textMuted} />
+                      ) : (
+                        <Ionicons name="add-circle-outline" size={20} color={colors.teal} />
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                );
+              })}
+            </View>
+          )}
+
           {/* ── This Week on TPC ── */}
           {latestVideo && (
             <ThisWeekCard
@@ -817,8 +902,29 @@ export default function HomeScreen() {
 
               {/* Pedal name */}
               <Text style={styles.weeklyModalPedal}>{weeklyPick.brand} {weeklyPick.model}</Text>
-              {weeklyPick.category && (
-                <Text style={styles.weeklyModalCategory}>{weeklyPick.category}</Text>
+              <View style={styles.weeklyModalMeta}>
+                {weeklyPick.category && (
+                  <Text style={styles.weeklyModalCategory}>{weeklyPick.category}</Text>
+                )}
+                {weeklyPick.isTpcVideo && (
+                  <View style={styles.tpcBadge}>
+                    <Ionicons name="logo-youtube" size={11} color="#FF0000" />
+                    <Text style={styles.tpcBadgeText}>TPC Video</Text>
+                  </View>
+                )}
+              </View>
+
+              {/* Embedded video */}
+              {weeklyPick.videoId && (
+                <View style={styles.weeklyVideoWrapper}>
+                  <WebView
+                    style={styles.weeklyVideo}
+                    source={{ uri: `https://www.youtube.com/embed/${weeklyPick.videoId}?playsinline=1&rel=0&modestbranding=1` }}
+                    allowsInlineMediaPlayback
+                    mediaPlaybackRequiresUserAction={false}
+                    scrollEnabled={false}
+                  />
+                </View>
               )}
 
               {/* Why */}
@@ -827,15 +933,6 @@ export default function HomeScreen() {
 
               {/* Actions */}
               <View style={styles.weeklyModalActions}>
-                <TouchableOpacity
-                  style={styles.weeklyModalBtnReverb}
-                  activeOpacity={0.8}
-                  onPress={() => Linking.openURL(reverbSearchUrl(`${weeklyPick.brand} ${weeklyPick.model}`))}
-                >
-                  <Ionicons name="storefront-outline" size={16} color="#fff" />
-                  <Text style={styles.weeklyModalBtnReverbText}>See on Reverb</Text>
-                </TouchableOpacity>
-
                 <TouchableOpacity
                   style={[styles.weeklyModalBtnWishlist, weeklyWishlistState !== 'idle' && styles.weeklyModalBtnWishlistDone]}
                   activeOpacity={0.8}
@@ -1299,6 +1396,72 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   // Weekly Pick card
+  trendingSection: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: 'hidden',
+  },
+  trendingHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  trendingHeaderText: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.bodySemiBold,
+    color: colors.rose,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  trendingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 2,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    gap: spacing.sm,
+  },
+  trendingThumb: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.sm,
+    backgroundColor: colors.surfaceHigh,
+  },
+  trendingThumbPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  trendingInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  trendingPedalName: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textPrimary,
+  },
+  trendingCount: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.body,
+    color: colors.textMuted,
+  },
+  trendingWishlistBtn: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  trendingWishlistBtnDone: {
+    opacity: 0.7,
+  },
   weeklyCard: {
     backgroundColor: 'rgba(212,175,55,0.06)',
     borderWidth: 1,
@@ -1420,20 +1583,36 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     marginTop: spacing.sm,
   },
-  weeklyModalBtnReverb: {
-    flex: 1,
+  weeklyModalMeta: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs,
-    backgroundColor: '#E25B45',
-    borderRadius: radius.lg,
-    paddingVertical: spacing.md,
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
   },
-  weeklyModalBtnReverbText: {
-    fontSize: typography.sizes.base,
+  tpcBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(255,0,0,0.08)',
+    borderRadius: radius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+  },
+  tpcBadgeText: {
+    fontSize: typography.sizes.xs,
     fontFamily: typography.bodySemiBold,
-    color: '#fff',
+    color: '#CC0000',
+  },
+  weeklyVideoWrapper: {
+    width: '100%',
+    aspectRatio: 16 / 9,
+    borderRadius: radius.md,
+    overflow: 'hidden',
+    backgroundColor: '#000',
+    marginBottom: spacing.md,
+  },
+  weeklyVideo: {
+    flex: 1,
   },
   weeklyModalBtnWishlist: {
     flex: 1,

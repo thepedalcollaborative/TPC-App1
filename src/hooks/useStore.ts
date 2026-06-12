@@ -43,6 +43,9 @@ type Store = {
     category: string | null;
     weekKey: string;
     generatedAt: string;
+    videoId: string | null;
+    videoTitle: string | null;
+    isTpcVideo: boolean;
   } | null;
   weeklyPickLoading: boolean;
   fetchWeeklyPick: () => Promise<void>;
@@ -114,6 +117,9 @@ type WeeklyPickResponse = {
   category: string | null;
   weekKey: string;
   generatedAt: string;
+  videoId: string | null;
+  videoTitle: string | null;
+  isTpcVideo: boolean;
 };
 
 type MarketValueResponse = {

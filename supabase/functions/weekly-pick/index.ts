@@ -1,17 +1,21 @@
 // weekly-pick — generates one AI pedal recommendation per Pro user per ISO week.
 //
-// Cache-first: checks weekly_picks table before calling Claude.
-// Model: claude-haiku-4-5-20251001 (cheap — simple structured output, no streaming).
-// Auth: requires valid Supabase JWT; verifies user is Pro before generating.
+// Priority:
+//   1. Pedals TPC has a YouTube video for (fetched live from the TPC channel).
+//      Claude picks from this list if any pedal is a good fit for the user.
+//   2. Free pick — Claude chooses any pedal, then we search YouTube broadly
+//      for a demo video from any channel.
 //
-// Deploy: npx supabase functions deploy weekly-pick --no-verify-jwt
-// (JWT is verified manually below so we can return a structured error to the client)
+// Cache-first: checks weekly_picks table before calling Claude or YouTube.
+// Model: claude-haiku-4-5-20251001 (cheap — simple structured output).
+// Auth: requires valid Supabase JWT; verifies user is Pro before generating.
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
-const HAIKU = 'claude-haiku-4-5-20251001';
+const SONNET            = 'claude-sonnet-4-6';
+const TPC_CHANNEL_ID    = 'UCatp9V-Jx2KayYer0y052kw';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -28,24 +32,102 @@ function json(body: unknown, status = 200) {
 // ─── ISO week key ─────────────────────────────────────────────────────────────
 function getWeekKey(): string {
   const d = new Date();
-  const day = d.getUTCDay() || 7;          // 1 Mon … 7 Sun
-  d.setUTCDate(d.getUTCDate() + 4 - day);  // shift to nearest Thursday
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - day);
   const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
   const week = Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
   return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
 }
 
-// ─── Build user context for prompt ───────────────────────────────────────────
+// ─── Fetch ALL TPC YouTube videos via the uploads playlist ───────────────────
+// Uses playlistItems.list (1 quota unit/page) instead of search (100 units/page).
+// The uploads playlist ID is the channel ID with "UC" replaced by "UU".
+type YTVideo = { id: string; title: string };
+
+async function fetchTpcVideos(ytKey: string): Promise<YTVideo[]> {
+  const uploadsPlaylistId = TPC_CHANNEL_ID.replace(/^UC/, 'UU');
+  const videos: YTVideo[] = [];
+  let pageToken = '';
+
+  try {
+    // Safety cap: max 10 pages × 50 = 500 videos — more than enough for any channel
+    for (let page = 0; page < 10; page++) {
+      const params = new URLSearchParams({
+        part:       'snippet',
+        playlistId: uploadsPlaylistId,
+        maxResults: '50',
+        key:        ytKey,
+      });
+      if (pageToken) params.set('pageToken', pageToken);
+
+      const res = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?${params}`);
+      if (!res.ok) break;
+
+      const data = await res.json();
+      const items = (data.items ?? []) as Record<string, unknown>[];
+
+      for (const item of items) {
+        const snippet    = item.snippet as Record<string, unknown> | undefined;
+        const resourceId = snippet?.resourceId as Record<string, unknown> | undefined;
+        const id         = resourceId?.videoId as string | undefined;
+        const title      = snippet?.title as string | undefined;
+        if (id && title && title !== 'Private video' && title !== 'Deleted video') {
+          videos.push({ id, title });
+        }
+      }
+
+      pageToken = (data.nextPageToken as string) ?? '';
+      if (!pageToken) break; // no more pages
+    }
+  } catch {
+    // Non-fatal — return whatever we collected before the error
+  }
+
+  return videos;
+}
+
+// ─── Search YouTube broadly for a demo video ──────────────────────────────────
+async function searchYouTubeDemo(query: string, ytKey: string): Promise<YTVideo | null> {
+  try {
+    const params = new URLSearchParams({
+      part:       'snippet',
+      q:          `${query} pedal demo`,
+      type:       'video',
+      maxResults: '1',
+      key:        ytKey,
+    });
+    const res = await fetch(`https://www.googleapis.com/youtube/v3/search?${params}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const item = (data.items ?? [])[0] as Record<string, unknown> | undefined;
+    if (!item) return null;
+    return {
+      id:    (item.id as Record<string, unknown>)?.videoId as string,
+      title: (item.snippet as Record<string, unknown>)?.title as string,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Build Claude prompt ──────────────────────────────────────────────────────
 function buildPrompt(
-  owned: Array<{ brand: string; model: string; category: string }>,
+  owned:    Array<{ brand: string; model: string; category: string }>,
   wishlist: Array<{ brand: string; model: string }>,
-  profile: { genres?: string[]; tone_identity?: string; playing_style?: string } | null,
+  profile:  { genres?: string[]; tone_identity?: string; playing_style?: string } | null,
+  tpcVideos: YTVideo[],
 ): string {
-  const ownedList = owned.slice(0, 20).map(p => `${p.brand} ${p.model} (${p.category})`).join(', ') || 'none yet';
-  const wishList = wishlist.slice(0, 10).map(p => `${p.brand} ${p.model}`).join(', ') || 'none';
-  const genres = profile?.genres?.join(', ') || 'not specified';
-  const tone = profile?.tone_identity || 'not described';
-  const style = profile?.playing_style || 'not specified';
+  const ownedList   = owned.slice(0, 20).map(p => `${p.brand} ${p.model} (${p.category})`).join(', ') || 'none yet';
+  const wishList    = wishlist.slice(0, 10).map(p => `${p.brand} ${p.model}`).join(', ') || 'none';
+  const genres      = profile?.genres?.join(', ') || 'not specified';
+  const tone        = profile?.tone_identity || 'not described';
+  const style       = profile?.playing_style || 'not specified';
+
+  const tpcSection = tpcVideos.length > 0
+    ? `\nTPC YouTube videos available (PREFER one of these if it genuinely fits):\n${
+        tpcVideos.map(v => `- video_id:${v.id} | "${v.title}"`).join('\n')
+      }\n`
+    : '';
 
   return `You are TPC's Weekly Pick engine. A guitarist needs ONE fresh pedal recommendation this week.
 
@@ -55,11 +137,13 @@ Their current rig:
 - Genres: ${genres}
 - Tone identity: ${tone}
 - Playing style: ${style}
+${tpcSection}
+Pick ONE pedal they don't own yet that would most meaningfully expand their sound. Avoid anything already on their wishlist. Be specific — name an exact model.
 
-Pick ONE pedal they don't own yet that would most meaningfully expand their sound. Avoid anything already on their wishlist. Be specific — name an exact model, not a generic suggestion.
+If you pick a pedal from the TPC video list, include its video_id. Otherwise set tpc_video_id to null.
 
 Return ONLY valid JSON with no extra text:
-{"brand":"string","model":"string","why":"string (2-3 punchy sentences max)","category":"string"}`;
+{"brand":"string","model":"string","why":"string (2-3 punchy sentences max)","category":"string","tpc_video_id":"string or null"}`;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -74,10 +158,11 @@ serve(async (req) => {
     const supabaseUrl  = Deno.env.get('SUPABASE_URL')!;
     const serviceKey   = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+    const ytKey        = Deno.env.get('YOUTUBE_API_KEY') ?? '';
+
     if (!anthropicKey) return json({ error: 'AI service not configured' }, 500);
 
-    // Use anon client to verify JWT
-    const anonKey = Deno.env.get('SUPABASE_ANON_KEY')!;
+    const anonKey    = Deno.env.get('SUPABASE_ANON_KEY')!;
     const userClient = createClient(supabaseUrl, anonKey, {
       global: { headers: { Authorization: authHeader } },
     });
@@ -113,12 +198,15 @@ serve(async (req) => {
         category:    cached.category,
         weekKey:     cached.week_key,
         generatedAt: cached.generated_at,
+        videoId:     cached.video_id ?? null,
+        videoTitle:  cached.video_title ?? null,
+        isTpcVideo:  cached.is_tpc_video ?? false,
         fromCache:   true,
       });
     }
 
-    // ── Fetch user context ────────────────────────────────────────────────────
-    const [{ data: ownedRows }, { data: wishlistRows }] = await Promise.all([
+    // ── Fetch context in parallel ─────────────────────────────────────────────
+    const [ownedResult, wishlistResult, tpcVideos] = await Promise.all([
       admin
         .from('user_pedals')
         .select('pedal:pedals(brand, model, category)')
@@ -131,14 +219,21 @@ serve(async (req) => {
         .eq('user_id', user.id)
         .eq('status', 'wishlist')
         .limit(10),
+      ytKey ? fetchTpcVideos(ytKey) : Promise.resolve([]),
     ]);
 
-    const owned = (ownedRows ?? []).map((r: { pedal: { brand: string; model: string; category: string } | null }) => r.pedal).filter(Boolean) as Array<{ brand: string; model: string; category: string }>;
-    const wishlist = (wishlistRows ?? []).map((r: { pedal: { brand: string; model: string } | null }) => r.pedal).filter(Boolean) as Array<{ brand: string; model: string }>;
-    const expertProfile = profileRow.pedal_expert_profile as { genres?: string[]; tone_identity?: string; playing_style?: string } | null;
+    const owned = (ownedResult.data ?? [])
+      .map((r: { pedal: { brand: string; model: string; category: string } | null }) => r.pedal)
+      .filter(Boolean) as Array<{ brand: string; model: string; category: string }>;
+    const wishlist = (wishlistResult.data ?? [])
+      .map((r: { pedal: { brand: string; model: string } | null }) => r.pedal)
+      .filter(Boolean) as Array<{ brand: string; model: string }>;
+    const expertProfile = profileRow.pedal_expert_profile as {
+      genres?: string[]; tone_identity?: string; playing_style?: string
+    } | null;
 
     // ── Generate with Claude Haiku ────────────────────────────────────────────
-    const prompt = buildPrompt(owned, wishlist, expertProfile);
+    const prompt = buildPrompt(owned, wishlist, expertProfile, tpcVideos);
 
     const aiRes = await fetch(ANTHROPIC_API_URL, {
       method: 'POST',
@@ -148,8 +243,8 @@ serve(async (req) => {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: HAIKU,
-        max_tokens: 256,
+        model: SONNET,
+        max_tokens: 300,
         messages: [{ role: 'user', content: prompt }],
       }),
     });
@@ -160,12 +255,11 @@ serve(async (req) => {
       return json({ error: 'AI generation failed' }, 500);
     }
 
-    const aiData = await aiRes.json();
+    const aiData  = await aiRes.json();
     const rawText = aiData.content?.[0]?.text ?? '';
 
-    let pick: { brand: string; model: string; why: string; category: string };
+    let pick: { brand: string; model: string; why: string; category: string; tpc_video_id?: string | null };
     try {
-      // Strip markdown code fences if present
       const cleaned = rawText.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
       pick = JSON.parse(cleaned);
       if (!pick.brand || !pick.model || !pick.why) throw new Error('incomplete');
@@ -174,23 +268,50 @@ serve(async (req) => {
       return json({ error: 'Failed to parse AI response' }, 500);
     }
 
+    // ── Resolve video ─────────────────────────────────────────────────────────
+    let videoId:    string | null = null;
+    let videoTitle: string | null = null;
+    let isTpcVideo = false;
+
+    if (pick.tpc_video_id) {
+      // Claude picked from the TPC list — find the matching title
+      const tpcMatch = tpcVideos.find(v => v.id === pick.tpc_video_id);
+      if (tpcMatch) {
+        videoId    = tpcMatch.id;
+        videoTitle = tpcMatch.title;
+        isTpcVideo = true;
+      }
+    }
+
+    if (!videoId && ytKey) {
+      // Free pick — search YouTube for any good demo
+      const demo = await searchYouTubeDemo(`${pick.brand} ${pick.model}`, ytKey);
+      if (demo?.id) {
+        videoId    = demo.id;
+        videoTitle = demo.title;
+        isTpcVideo = false;
+      }
+    }
+
     // ── Store and return ──────────────────────────────────────────────────────
     const { data: saved, error: insertError } = await admin
       .from('weekly_picks')
       .insert({
-        user_id:  user.id,
-        brand:    pick.brand,
-        model:    pick.model,
-        why:      pick.why,
-        category: pick.category ?? null,
-        week_key: weekKey,
+        user_id:      user.id,
+        brand:        pick.brand,
+        model:        pick.model,
+        why:          pick.why,
+        category:     pick.category ?? null,
+        week_key:     weekKey,
+        video_id:     videoId,
+        video_title:  videoTitle,
+        is_tpc_video: isTpcVideo,
       })
       .select()
       .single();
 
     if (insertError) {
       console.error('[weekly-pick] Insert error:', insertError.message);
-      // If unique conflict, another request raced us — return what we generated
     }
 
     return json({
@@ -200,6 +321,9 @@ serve(async (req) => {
       category:    pick.category ?? null,
       weekKey,
       generatedAt: saved?.generated_at ?? new Date().toISOString(),
+      videoId,
+      videoTitle,
+      isTpcVideo,
       fromCache:   false,
     });
 

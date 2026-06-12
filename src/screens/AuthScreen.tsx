@@ -30,6 +30,7 @@ type Mode = 'signin' | 'signup';
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_ATTEMPTS = 5;
 const LOCKOUT_MS = 5 * 60 * 1000; // 5 minutes
+const FUNCTIONS_URL = 'https://skejiotfywhmnvsivfsk.supabase.co/functions/v1';
 
 // In Expo SDK 54, appOwnership === 'expo' is the reliable Expo Go signal.
 // executionEnvironment is no longer a stable discriminator across SDK versions.
@@ -70,6 +71,7 @@ export default function AuthScreen() {
   // ── Email/password sign in ────────────────────────────────────────────────
 
   const handleSignIn = async () => {
+    // Client-side lockout is a fast first-pass; server enforces the real limit.
     if (isLockedOut()) { setError(getLockoutMessage()); return; }
     if (!email.trim() || !password.trim()) {
       setError('Please enter your email and password.');
@@ -81,12 +83,30 @@ export default function AuthScreen() {
     }
     setLoading(true);
     setError('');
-    const { data, error: err } = await supabase.auth.signInWithPassword({
-      email: email.trim().toLowerCase(),
-      password,
-    });
-    setLoading(false);
-    if (err) {
+
+    let res: Response;
+    let authData: Record<string, unknown>;
+    try {
+      res = await fetch(`${FUNCTIONS_URL}/auth-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+      });
+      authData = await res.json();
+    } catch {
+      setLoading(false);
+      setError('Network error. Please check your connection and try again.');
+      return;
+    }
+
+    if (res.status === 429) {
+      setLoading(false);
+      setError((authData.error as string) ?? 'Too many failed attempts. Please wait before trying again.');
+      return;
+    }
+
+    if (!res.ok || !authData.access_token) {
+      setLoading(false);
       failedAttempts.current += 1;
       if (failedAttempts.current >= MAX_ATTEMPTS) {
         lockoutUntil.current = Date.now() + LOCKOUT_MS;
@@ -95,11 +115,24 @@ export default function AuthScreen() {
       } else {
         setError('Invalid email or password. Please try again.');
       }
-    } else {
-      if (data.session) setSession(data.session);
-      failedAttempts.current = 0;
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      return;
     }
+
+    // Set session from the tokens the Edge Function proxied back.
+    const { data: sessionData, error: sessionErr } = await supabase.auth.setSession({
+      access_token:  authData.access_token as string,
+      refresh_token: authData.refresh_token as string,
+    });
+    setLoading(false);
+
+    if (sessionErr || !sessionData.session) {
+      setError('Sign in failed. Please try again.');
+      return;
+    }
+
+    setSession(sessionData.session);
+    failedAttempts.current = 0;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   };
 
   const handleSignUp = async () => {

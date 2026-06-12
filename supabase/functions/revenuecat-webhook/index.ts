@@ -26,6 +26,19 @@ const INACTIVE_EVENTS = new Set([
   'SUBSCRIBER_ALIAS',
 ]);
 
+// Constant-time string comparison — avoids leaking how many leading characters
+// of the shared secret matched via response timing. Compares the full byte
+// range with XOR accumulation rather than short-circuiting on first mismatch.
+function timingSafeEqual(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  if (ab.length !== bb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < ab.length; i++) diff |= ab[i] ^ bb[i];
+  return diff === 0;
+}
+
 Deno.serve(async (req) => {
   // ── Auth ───────────────────────────────────────────────────────────────────
   // Reject everything if the secret isn't configured — an unauthenticated webhook
@@ -36,7 +49,7 @@ Deno.serve(async (req) => {
     return new Response('Webhook not configured', { status: 503 });
   }
   const auth = req.headers.get('Authorization') ?? '';
-  if (auth !== secret) {
+  if (!timingSafeEqual(auth, secret)) {
     return new Response('Unauthorized', { status: 401 });
   }
 

@@ -69,14 +69,41 @@ serve(async (req) => {
 
   const signalLines: string[] = [];
 
-  // ── 1. Trending additions (last 30 days) ─────────────────────────────────
+  // ── 0. Weekly conversation topics (from community-digest cache) ──────────
+  try {
+    const { data: cached } = await supabase
+      .from('community_signals_cache')
+      .select('payload')
+      .eq('signal_type', 'weekly_topics')
+      .single();
+    if (cached?.payload?.topics_text) {
+      signalLines.push(cached.payload.topics_text as string);
+    }
+  } catch {
+    // Non-fatal — no topics cached yet
+  }
+
+  // ── 1. Trending additions (last 30 days, opt-in users only) ─────────────
   try {
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const { data: trending } = await supabase
+
+    // Get IDs of users who have opted out
+    const { data: optedOut } = await supabase
+      .from('user_profiles')
+      .select('id')
+      .eq('allow_activity_in_trends', false);
+    const optedOutIds = (optedOut ?? []).map((r: { id: string }) => r.id);
+
+    const trendingQuery = supabase
       .from('user_pedals')
       .select('pedal_id, pedal:pedals(brand, model)')
       .eq('status', 'owned')
       .gte('created_at', since);
+
+    // Only exclude opted-out users if there are any
+    const { data: trending } = optedOutIds.length > 0
+      ? await trendingQuery.not('user_id', 'in', `(${optedOutIds.join(',')})`)
+      : await trendingQuery;
 
     if (trending && trending.length > 0) {
       // Count by pedal_id in JS

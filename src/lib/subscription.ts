@@ -91,9 +91,6 @@ export async function syncEntitlement(): Promise<boolean> {
   } catch { return false; }
 }
 
-// ─── Usage limits ─────────────────────────────────────────────────────────────
-export const FREE_BOARDS_LIMIT = 2;
-
 // ─── Pricing display ─────────────────────────────────────────────────────────
 // Fallback strings used in Expo Go (where RevenueCat can't run) and as
 // placeholders before live prices load. Always prefer fetchLivePrices().
@@ -155,6 +152,8 @@ export type LastPick = {
 };
 
 // ─── Boards ───────────────────────────────────────────────────────────────────
+export const FREE_BOARDS_LIMIT = 2;
+
 export function boardCreationAllowed(isPro: boolean, currentBoardCount: number): boolean {
   if (isPro || BETA_FULL_ACCESS) return true;
   return currentBoardCount < FREE_BOARDS_LIMIT;

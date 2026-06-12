@@ -13,7 +13,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-const ALLOTMENT = 100; // Pro monthly message allotment
+const ALLOTMENT = 50; // Pro monthly message allotment (beta)
 
 Deno.serve(async (req) => {
   // ── Auth ───────────────────────────────────────────────────────────────────
@@ -54,7 +54,10 @@ Deno.serve(async (req) => {
   }
 
   if (!row.allowed) {
-    if (row.error === 'pro_required') return json({ allowed: false, error: 'pro_required' }, 403);
+    if (row.error === 'pro_required') return json({
+      allowed: false, error: 'pro_required',
+      free_used: row.free_used ?? 0, free_allotment: row.free_allotment ?? 3,
+    }, 403);
     if (row.error === 'messages_depleted') return json({ allowed: false, error: 'messages_depleted', credits: row.credits ?? 0 }, 402);
     if (row.error === 'profile_not_found') return json({ allowed: false, error: 'profile_not_found' }, 404);
     return json({ allowed: false, error: row.error ?? 'unauthorized' }, 401);
@@ -65,6 +68,15 @@ Deno.serve(async (req) => {
       allowed: true,
       used_credit: true,
       credits: row.credits ?? 0,
+    });
+  }
+
+  // Free tier: row.free_used is set, row.used is null
+  if (row.free_used != null) {
+    return json({
+      allowed: true,
+      free_used: row.free_used,
+      free_allotment: row.free_allotment ?? 3,
     });
   }
 

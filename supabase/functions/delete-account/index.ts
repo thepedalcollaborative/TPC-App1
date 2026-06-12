@@ -102,14 +102,45 @@ serve(async (req) => {
     await admin.from('recommendation_feedback').delete().eq('user_id', userId);
     await admin.from('patreon_connections').delete().eq('user_id', userId);
 
-    // Storage: delete user's pedal photos folder
-    const { data: objects } = await admin.storage
-      .from('user-pedal-photos')
-      .list(userId);
+    // Storage: delete ALL of the user's pedal photos.
+    //
+    // Photos are stored nested at `${userId}/pedals/${pedalId}/${ts}.jpg`, so a
+    // single `.list(userId)` only returns the `pedals` folder *prefix* — not the
+    // actual files. Supabase Storage has no recursive delete, so we walk the
+    // tree: list folders, recurse into each, and collect every real object key
+    // (entries with a non-null `id`). Without this, a user who deletes their
+    // account leaves their photos in storage indefinitely (right-to-erasure bug).
+    const collectFileKeys = async (prefix: string): Promise<string[]> => {
+      const keys: string[] = [];
+      const { data: entries } = await admin.storage
+        .from('user-pedal-photos')
+        .list(prefix, { limit: 1000 });
 
-    if (objects && objects.length > 0) {
-      const paths = objects.map((o: { name: string }) => `${userId}/${o.name}`);
-      await admin.storage.from('user-pedal-photos').remove(paths);
+      for (const entry of entries ?? []) {
+        const fullPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+        // A null `id` means this is a folder/prefix, not a file → recurse.
+        if ((entry as { id: string | null }).id === null) {
+          keys.push(...await collectFileKeys(fullPath));
+        } else {
+          keys.push(fullPath);
+        }
+      }
+      return keys;
+    };
+
+    try {
+      const fileKeys = await collectFileKeys(userId);
+      // remove() caps at 1000 keys per call — chunk to be safe.
+      for (let i = 0; i < fileKeys.length; i += 1000) {
+        const batch = fileKeys.slice(i, i + 1000);
+        if (batch.length > 0) {
+          await admin.storage.from('user-pedal-photos').remove(batch);
+        }
+      }
+    } catch (storageErr) {
+      // Non-fatal: log but continue with account deletion. We don't want a
+      // storage hiccup to block the auth-user deletion the user requested.
+      console.error('[delete-account] storage cleanup error:', storageErr);
     }
 
     // ── 4. Delete the auth user (cascades to user_profiles) ───────────────────

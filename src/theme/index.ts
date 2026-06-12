@@ -39,7 +39,7 @@ export const colors = {
   eq: '#0EA5E9',             // sky blue
   delay: '#2563EB',          // blue
   reverb: '#8B5CF6',         // violet
-  modulation: '#EC4899',     // pink
+  modulation: '#EC4899',     // pink  (catch-all)
   looper: '#14B8A6',         // teal
   pitch: '#A16207',          // gold
   utility: '#6B7280',        // slate
@@ -48,6 +48,19 @@ export const colors = {
   other: '#94A3B8',          // light slate
   multifx: '#F97316',        // orange
   modeler: '#38BDF8',        // light blue
+  // ── Expanded categories ───────────────────────────────────────────────────
+  fuzz: '#DC2626',           // red
+  distortion: '#9A3412',     // dark rust
+  chorus: '#0D9488',         // dark teal-green
+  phaser: '#65A30D',         // olive
+  flanger: '#6366F1',        // cornflower
+  tremolo: '#B45309',        // dark caramel
+  wah: '#D97706',            // amber-gold
+  octave: '#7C3AED',         // deep purple
+  volume: '#78716C',         // warm gray
+  noisegate: '#15803D',      // dark green
+  buffer: '#334155',         // dark slate
+  preamp: '#92400E',         // dark amber / tubes
 };
 
 export const typography = {
@@ -105,21 +118,35 @@ export const gradients = {
 
 // ── Category colors map ───────────────────────────────────────────────────────
 export const categoryColors: Record<string, string> = {
-  drive: colors.drive,
-  boost: colors.boost,
+  // Original
+  drive:      colors.drive,
+  boost:      colors.boost,
   compressor: colors.compressor,
-  eq: colors.eq,
+  eq:         colors.eq,
   modulation: colors.modulation,
-  delay: colors.delay,
-  reverb: colors.reverb,
-  utility: colors.utility,
-  looper: colors.looper,
-  pitch: colors.pitch,
-  ambient: colors.ambient,
-  synth: colors.synth,
-  other: colors.other,
-  multifx: colors.multifx,
-  modeler: colors.modeler,
+  delay:      colors.delay,
+  reverb:     colors.reverb,
+  utility:    colors.utility,
+  looper:     colors.looper,
+  pitch:      colors.pitch,
+  ambient:    colors.ambient,
+  synth:      colors.synth,
+  other:      colors.other,
+  multifx:    colors.multifx,
+  modeler:    colors.modeler,
+  // Expanded
+  fuzz:       colors.fuzz,
+  distortion: colors.distortion,
+  chorus:     colors.chorus,
+  phaser:     colors.phaser,
+  flanger:    colors.flanger,
+  tremolo:    colors.tremolo,
+  wah:        colors.wah,
+  octave:     colors.octave,
+  volume:     colors.volume,
+  noisegate:  colors.noisegate,
+  buffer:     colors.buffer,
+  preamp:     colors.preamp,
 };
 
 // ── Board colors (brand palette) ─────────────────────────────────────────────

@@ -14,12 +14,15 @@ import {
   Linking,
   Platform,
   Switch,
+  Share,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { RootStackParamList } from '../types/navigation';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, spacing, radius, gradients } from '../theme';
 import { useStore } from '../hooks/useStore';
@@ -28,7 +31,7 @@ import { ToneProfileEditor } from '../components';
 import { StatCard, TPCLogoMark } from '../components';
 import { hasBetaFullAccess } from '../lib/subscription';
 import { connectPatreon } from '../lib/patreon';
-import { CURRENCIES, type CurrencyCode } from '../lib/formatMoney';
+import { CURRENCIES, type CurrencyCode, formatMoney } from '../lib/formatMoney';
 import * as Notifications from 'expo-notifications';
 import {
   requestNotificationPermissions,
@@ -40,9 +43,29 @@ import { SwipeDismissSheet } from '../components/SwipeDismissSheet';
 
 const tpcSquare = require('../../assets/tpc-square.png');
 
+interface VaultStats {
+  repeat_offenders: Array<{ brand: string; model: string; times: number }> | null;
+  most_expensive:   { brand: string; model: string; price: number } | null;
+  biggest_loss:     { brand: string; model: string; loss: number }  | null;
+  quickest_flip:    { brand: string; model: string; days: number }  | null;
+  longest_in_vault: { brand: string; model: string; days: number }  | null;
+  total_spent:      number;
+  category_obsession: string | null;
+  brand_loyalty:      string | null;
+  total_through_hands: number;
+}
+
+function fmtDays(days: number): string {
+  if (days < 2)   return '1 day';
+  if (days < 30)  return `${days} days`;
+  if (days < 365) return `${Math.round(days / 30)} mo`;
+  const yrs = (days / 365);
+  return `${yrs % 1 === 0 ? yrs.toFixed(0) : yrs.toFixed(1)} yr${yrs >= 2 ? 's' : ''}`;
+}
+
 export default function ProfileScreen() {
   const insets = useSafeAreaInsets();
-  const navigation = useNavigation();
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const { session, profile, ownedPedals, wishlistPedals, retiredPedals, boards, fetchProfile, signOut, deleteAccount, viewMode, setViewMode, openPaywall, totalMarketValue, wifeMode, setWifeMode, currency, setCurrency } =
     useStore();
 
@@ -55,6 +78,47 @@ export default function ProfileScreen() {
   const isPatreonPro = profile?.pro_source === 'patreon';
   const [patreonLoading, setPatreonLoading] = useState(false);
   const [showCurrencyPicker, setShowCurrencyPicker] = useState(false);
+  const [activityInTrends, setActivityInTrends] = useState<boolean>(
+    profile?.allow_activity_in_trends !== false
+  );
+  const [vaultStats, setVaultStats] = useState<VaultStats | null>(null);
+  const [showRepeatOffenders, setShowRepeatOffenders] = useState(false);
+  const [isPublicProfile, setIsPublicProfile] = useState<boolean>(
+    profile?.is_public_profile === true
+  );
+
+  const handleActivityInTrendsToggle = async (value: boolean) => {
+    Haptics.selectionAsync();
+    setActivityInTrends(value);
+    if (!session?.user?.id) return;
+    await supabase
+      .from('user_profiles')
+      .update({ allow_activity_in_trends: value })
+      .eq('id', session.user.id);
+  };
+
+  const FUNCTIONS_URL = 'https://skejiotfywhmnvsivfsk.supabase.co/functions/v1';
+
+  const handlePublicProfileToggle = async (value: boolean) => {
+    Haptics.selectionAsync();
+    setIsPublicProfile(value);
+    if (!session?.user?.id) return;
+    await supabase
+      .from('user_profiles')
+      .update({ is_public_profile: value })
+      .eq('id', session.user.id);
+  };
+
+  const handleShareProfile = async () => {
+    if (!profile?.username) return;
+    Haptics.selectionAsync();
+    const url  = `${FUNCTIONS_URL}/public-profile?u=${profile.username}`;
+    const name = profile.display_name ?? `@${profile.username}`;
+    await Share.share({
+      message: `Check out ${name}'s gear vault on The Pedal Collaborative — ${url}`,
+      url,
+    });
+  };
 
   const handleConnectPatreon = async () => {
     Haptics.selectionAsync();
@@ -95,6 +159,14 @@ export default function ProfileScreen() {
       if (v === '1') setPremiumMinimized(true);
     });
   }, []);
+
+  // ── Vault stats ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!session?.user?.id) return;
+    supabase
+      .rpc('get_vault_stats', { p_user_id: session.user.id })
+      .then(({ data }) => { if (data) setVaultStats(data as VaultStats); });
+  }, [session?.user?.id]);
 
   const togglePremiumMinimized = useCallback(() => {
     setPremiumMinimized(prev => {
@@ -424,7 +496,7 @@ export default function ProfileScreen() {
           <View style={styles.settingsDivider} />
           <TouchableOpacity
             style={styles.settingsRow}
-            onPress={() => { Haptics.selectionAsync(); navigation.navigate('GearHistory' as never); }}
+            onPress={() => { Haptics.selectionAsync(); navigation.navigate('GearHistory'); }}
             activeOpacity={0.75}
           >
             <Ionicons name="archive-outline" size={20} color={colors.textSecondary} />
@@ -445,6 +517,160 @@ export default function ProfileScreen() {
           </TouchableOpacity>
         </View>
       </View>
+
+      {/* ── Vault Stats ── */}
+      {vaultStats && (
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>VAULT STATS</Text>
+          <View style={styles.settingsCard}>
+
+            {/* Repeat Offenders */}
+            {vaultStats.repeat_offenders && vaultStats.repeat_offenders.length > 0 && (
+              <>
+                <TouchableOpacity
+                  style={styles.settingsRow}
+                  onPress={() => { Haptics.selectionAsync(); setShowRepeatOffenders(v => !v); }}
+                  activeOpacity={0.75}
+                >
+                  <Ionicons name="repeat-outline" size={20} color={colors.textSecondary} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.settingsRowText}>Repeat Offenders</Text>
+                    <Text style={styles.settingsRowSub}>Pedals you keep coming back to</Text>
+                  </View>
+                  <Text style={styles.statValue}>{vaultStats.repeat_offenders.length}</Text>
+                  <Ionicons
+                    name={showRepeatOffenders ? 'chevron-up' : 'chevron-down'}
+                    size={16}
+                    color={colors.textMuted}
+                  />
+                </TouchableOpacity>
+                {showRepeatOffenders && (
+                  <View style={styles.repeatOffendersList}>
+                    {vaultStats.repeat_offenders.map((p, i) => (
+                      <View key={i} style={styles.repeatOffenderRow}>
+                        <Ionicons name="arrow-redo-outline" size={14} color={colors.textMuted} />
+                        <Text style={styles.repeatOffenderName}>{p.brand} {p.model}</Text>
+                        <Text style={styles.repeatOffenderTimes}>×{p.times}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+                <View style={styles.settingsDivider} />
+              </>
+            )}
+
+            {/* Most Expensive */}
+            {vaultStats.most_expensive && (
+              <>
+                <View style={styles.settingsRow}>
+                  <Ionicons name="pricetag-outline" size={20} color={colors.textSecondary} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.settingsRowText}>Most Expensive Owned</Text>
+                    <Text style={styles.settingsRowSub} numberOfLines={1}>
+                      {vaultStats.most_expensive.brand} {vaultStats.most_expensive.model}
+                    </Text>
+                  </View>
+                  <Text style={styles.statValue}>
+                    {formatMoney(vaultStats.most_expensive.price, currency, wifeMode)}
+                  </Text>
+                </View>
+                <View style={styles.settingsDivider} />
+              </>
+            )}
+
+            {/* Biggest Loss */}
+            {vaultStats.biggest_loss && (
+              <>
+                <View style={styles.settingsRow}>
+                  <Ionicons name="trending-down-outline" size={20} color={colors.textSecondary} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.settingsRowText}>Biggest Loss</Text>
+                    <Text style={styles.settingsRowSub} numberOfLines={1}>
+                      {vaultStats.biggest_loss.brand} {vaultStats.biggest_loss.model}
+                    </Text>
+                  </View>
+                  <Text style={styles.statValue}>
+                    −{formatMoney(vaultStats.biggest_loss.loss, currency, wifeMode)}
+                  </Text>
+                </View>
+                <View style={styles.settingsDivider} />
+              </>
+            )}
+
+            {/* Quickest Flip */}
+            {vaultStats.quickest_flip && (
+              <>
+                <View style={styles.settingsRow}>
+                  <Ionicons name="flash-outline" size={20} color={colors.textSecondary} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.settingsRowText}>Quickest Flip</Text>
+                    <Text style={styles.settingsRowSub} numberOfLines={1}>
+                      {vaultStats.quickest_flip.brand} {vaultStats.quickest_flip.model}
+                    </Text>
+                  </View>
+                  <Text style={styles.statValue}>{fmtDays(vaultStats.quickest_flip.days)}</Text>
+                </View>
+                <View style={styles.settingsDivider} />
+              </>
+            )}
+
+            {/* Longest in Vault */}
+            {vaultStats.longest_in_vault && (
+              <>
+                <View style={styles.settingsRow}>
+                  <Ionicons name="hourglass-outline" size={20} color={colors.textSecondary} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.settingsRowText}>Longest in the Vault</Text>
+                    <Text style={styles.settingsRowSub} numberOfLines={1}>
+                      {vaultStats.longest_in_vault.brand} {vaultStats.longest_in_vault.model}
+                    </Text>
+                  </View>
+                  <Text style={styles.statValue}>{fmtDays(vaultStats.longest_in_vault.days)}</Text>
+                </View>
+                <View style={styles.settingsDivider} />
+              </>
+            )}
+
+            {/* Total Spent */}
+            {vaultStats.total_spent > 0 && (
+              <>
+                <View style={styles.settingsRow}>
+                  <Ionicons name="wallet-outline" size={20} color={colors.textSecondary} />
+                  <Text style={styles.settingsRowText}>Total Spent on Pedals</Text>
+                  <Text style={styles.statValue}>
+                    {formatMoney(vaultStats.total_spent, currency, wifeMode)}
+                  </Text>
+                </View>
+                <View style={styles.settingsDivider} />
+              </>
+            )}
+
+            {/* Category Obsession */}
+            {vaultStats.category_obsession && (
+              <>
+                <View style={styles.settingsRow}>
+                  <Ionicons name="layers-outline" size={20} color={colors.textSecondary} />
+                  <Text style={styles.settingsRowText}>Category Obsession</Text>
+                  <Text style={styles.statValue}>
+                    {vaultStats.category_obsession.charAt(0).toUpperCase() + vaultStats.category_obsession.slice(1)}
+                  </Text>
+                </View>
+                <View style={styles.settingsDivider} />
+              </>
+            )}
+
+            {/* Brand Loyalty */}
+            {vaultStats.brand_loyalty && (
+              <View style={styles.settingsRow}>
+                <Ionicons name="ribbon-outline" size={20} color={colors.textSecondary} />
+                <Text style={styles.settingsRowText}>Brand Loyalty</Text>
+                <Text style={styles.statValue}>{vaultStats.brand_loyalty}</Text>
+              </View>
+            )}
+
+          </View>
+        </View>
+      )}
 
       {/* ── Settings ── */}
       <View style={styles.section}>
@@ -574,7 +800,7 @@ export default function ProfileScreen() {
           <View style={styles.settingsCard}>
             <TouchableOpacity
               style={styles.settingsRow}
-              onPress={() => navigation.navigate('Admin' as never)}
+              onPress={() => navigation.navigate('Admin')}
             >
               <Ionicons name="shield-checkmark-outline" size={20} color={colors.textSecondary} />
               <Text style={styles.settingsRowText}>Admin Console</Text>
@@ -628,6 +854,95 @@ export default function ProfileScreen() {
         </View>
       </View>
 
+
+      {/* ── Privacy ── */}
+      <View style={styles.section}>
+        <Text style={styles.sectionLabel}>PRIVACY</Text>
+        <View style={styles.settingsCard}>
+
+          {/* Public profile toggle */}
+          <View style={styles.settingsRow}>
+            <Ionicons name="earth-outline" size={20} color={colors.textSecondary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.settingsRowText}>Public Vault Profile</Text>
+              <Text style={styles.settingsRowSub}>Let others view your vault via a shareable link</Text>
+            </View>
+            <Switch
+              value={isPublicProfile}
+              onValueChange={handlePublicProfileToggle}
+              trackColor={{ false: colors.border, true: colors.teal + '99' }}
+              thumbColor={isPublicProfile ? colors.teal : colors.textMuted}
+              ios_backgroundColor={colors.border}
+            />
+          </View>
+
+          {/* Share link — only shown when public is on and they have a username */}
+          {isPublicProfile && profile?.username && (
+            <>
+              <View style={styles.settingsDivider} />
+              <TouchableOpacity
+                style={styles.settingsRow}
+                onPress={handleShareProfile}
+                activeOpacity={0.75}
+              >
+                <Ionicons name="share-outline" size={20} color={colors.teal} />
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.settingsRowText, { color: colors.teal }]}>Share My Profile</Text>
+                  <Text style={styles.settingsRowSub} numberOfLines={1}>
+                    tpc.app/u/{profile.username}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color={colors.teal} />
+              </TouchableOpacity>
+            </>
+          )}
+
+          <View style={styles.settingsDivider} />
+
+          {/* Community trends toggle */}
+          <View style={styles.settingsRow}>
+            <Ionicons name="bar-chart-outline" size={20} color={colors.textSecondary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.settingsRowText}>Community Trends</Text>
+              <Text style={styles.settingsRowSub}>Include my activity in anonymous community counts</Text>
+            </View>
+            <Switch
+              value={activityInTrends}
+              onValueChange={handleActivityInTrendsToggle}
+              trackColor={{ false: colors.border, true: colors.teal + '99' }}
+              thumbColor={activityInTrends ? colors.teal : colors.textMuted}
+              ios_backgroundColor={colors.border}
+            />
+          </View>
+
+        </View>
+      </View>
+
+      {/* ── Legal ── */}
+      <View style={styles.section}>
+        <Text style={styles.sectionLabel}>LEGAL</Text>
+        <View style={styles.settingsCard}>
+          <TouchableOpacity
+            style={styles.settingsRow}
+            onPress={() => { Haptics.selectionAsync(); navigation.navigate('Legal', { tab: 'privacy' }); }}
+            activeOpacity={0.75}
+          >
+            <Ionicons name="shield-outline" size={20} color={colors.textSecondary} />
+            <Text style={styles.settingsRowText}>Privacy Policy</Text>
+            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+          <View style={styles.settingsDivider} />
+          <TouchableOpacity
+            style={styles.settingsRow}
+            onPress={() => { Haptics.selectionAsync(); navigation.navigate('Legal', { tab: 'terms' }); }}
+            activeOpacity={0.75}
+          >
+            <Ionicons name="document-text-outline" size={20} color={colors.textSecondary} />
+            <Text style={styles.settingsRowText}>Terms of Service</Text>
+            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+        </View>
+      </View>
 
       {/* ── Sign Out ── */}
       <TouchableOpacity style={styles.signOutBtn} onPress={handleSignOut} activeOpacity={0.75}>
@@ -1172,6 +1487,35 @@ const styles = StyleSheet.create({
     fontFamily: typography.body,
     color: colors.textMuted,
     marginTop: 1,
+  },
+  // Vault stats
+  statValue: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.textSecondary,
+    maxWidth: 120,
+    textAlign: 'right',
+  },
+  repeatOffendersList: {
+    paddingHorizontal: spacing.base,
+    paddingBottom: spacing.sm,
+    gap: spacing.xs,
+  },
+  repeatOffenderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  repeatOffenderName: {
+    flex: 1,
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.body,
+    color: colors.textSecondary,
+  },
+  repeatOffenderTimes: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.teal,
   },
   currencyCode: {
     fontSize: typography.sizes.sm,

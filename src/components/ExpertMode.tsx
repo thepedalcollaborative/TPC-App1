@@ -375,6 +375,9 @@ export function ExpertMode({ onBack }: Props) {
   const [previousRecommendations, setPreviousRecommendations] = useState<{ brand: string; model: string }[]>([]);
   const [playerMemory, setPlayerMemory] = useState('');
   const playerMemoryRef = useRef('');
+  // Single-run ticket from custom-shop-gate — required by tpc-advisor for
+  // all custom_shop-purpose calls (analysis, questions, final pick).
+  const runTicketRef = useRef<string | null>(null);
 
   const { cardRef, cardData, triggerShare } = useShareCard();
   const chartRef = useRef<View>(null);
@@ -494,12 +497,14 @@ export function ExpertMode({ onBack }: Props) {
         allowed: boolean;
         error?: string;
         isFirstRun?: boolean;
+        ticket?: string;
       }>('custom-shop-gate', {});
 
-      if (gateErr || !gateData?.allowed) {
+      if (gateErr || !gateData?.allowed || !gateData.ticket) {
         openPaywall('custom_shop');
         return;
       }
+      runTicketRef.current = gateData.ticket;
     }
 
     setStage('analyzing');
@@ -519,7 +524,8 @@ export function ExpertMode({ onBack }: Props) {
     const [analysisResult, questionsResult] = await Promise.all([
       askClaudeOnce(
         analysisPrompt,
-        'You are a concise, knowledgeable guitar effects advisor. Respond with plain text, no markdown.'
+        'You are a concise, knowledgeable guitar effects advisor. Respond with plain text, no markdown.',
+        { purpose: 'custom_shop', ticket: runTicketRef.current ?? undefined }
       ),
       skipInterview ? Promise.resolve([] as InterviewQuestion[]) : generateInterviewQuestions(expertProfile, collectionSummary),
     ]);
@@ -542,7 +548,8 @@ export function ExpertMode({ onBack }: Props) {
     try {
       const result = await askClaudeOnce(
         prompt,
-        'You are a guitar effects expert. Return only valid JSON arrays, no markdown, no code blocks.'
+        'You are a guitar effects expert. Return only valid JSON arrays, no markdown, no code blocks.',
+        { purpose: 'custom_shop', ticket: runTicketRef.current ?? undefined }
       );
       const clean = result.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       const parsed = JSON.parse(clean) as InterviewQuestion[];
@@ -691,6 +698,8 @@ ${signal ? `${signal}\n` : ''}${exclusionBlock}${rejectionBlock}Find the ideal n
         maxTokens: 3000,
         model: 'claude-sonnet-4-20250514', // Custom Shop final pick — premium quality
         enableWebSearch: true,             // Lets Claude verify pricing + availability
+        purpose: 'custom_shop',
+        ticket: runTicketRef.current ?? undefined,
       });
 
       const raw = data?.content?.find(c => c.type === 'text')?.text ?? '';
