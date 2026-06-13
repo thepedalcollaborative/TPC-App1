@@ -6,6 +6,7 @@ export type RootStackParamList = {
   ChatHistory: undefined;
   Legal: { tab?: 'privacy' | 'terms' } | undefined;
   PublicProfile: { username: string };
+  AccountSettings: undefined;
 };
 
 export type TabParamList = {

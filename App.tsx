@@ -52,6 +52,7 @@ import GearHistoryScreen from './src/screens/GearHistoryScreen';
 import ChatHistoryScreen from './src/screens/ChatHistoryScreen';
 import LegalScreen from './src/screens/LegalScreen';
 import PublicProfileScreen from './src/screens/PublicProfileScreen';
+import AccountSettingsScreen from './src/screens/AccountSettingsScreen';
 
 // Defensive wrapper — prevents crash if native module isn't linked in Expo Go
 try { SplashScreen.preventAutoHideAsync(); } catch { /* no-op */ }
@@ -562,6 +563,11 @@ export default function App() {
         <Stack.Screen
           name="PublicProfile"
           component={PublicProfileScreen}
+          options={{ animation: 'slide_from_right', gestureEnabled: true }}
+        />
+        <Stack.Screen
+          name="AccountSettings"
+          component={AccountSettingsScreen}
           options={{ animation: 'slide_from_right', gestureEnabled: true }}
         />
       </Stack.Navigator>

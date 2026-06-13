@@ -814,12 +814,18 @@ export default function ProfileScreen() {
       <View style={styles.section}>
         <Text style={styles.sectionLabel}>ACCOUNT</Text>
         <View style={styles.settingsCard}>
-          <View style={styles.settingsRow}>
-            <Ionicons name="mail-outline" size={20} color={colors.textSecondary} />
-            <Text style={styles.settingsRowText} numberOfLines={1}>
-              {session?.user.email}
-            </Text>
-          </View>
+          <TouchableOpacity
+            style={styles.settingsRow}
+            onPress={() => { Haptics.selectionAsync(); navigation.navigate('AccountSettings'); }}
+            activeOpacity={0.75}
+          >
+            <Ionicons name="person-circle-outline" size={20} color={colors.textSecondary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.settingsRowText}>Account Settings</Text>
+              <Text style={styles.settingsRowSub} numberOfLines={1}>{session?.user.email}</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
 
           <View style={styles.settingsDivider} />
 
