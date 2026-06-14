@@ -114,8 +114,10 @@ export type LivePrices = {
 export async function fetchLivePrices(): Promise<LivePrices | null> {
   try {
     const offerings = await Purchases.getOfferings();
-    const monthly = offerings.current?.monthly;
-    const annual  = offerings.current?.annual;
+    const monthly = offerings.all['TPC Pro Monthly']?.availablePackages[0]
+      ?? offerings.current?.monthly;
+    const annual  = offerings.all['TPC Pro Annual']?.availablePackages[0]
+      ?? offerings.current?.annual;
     if (!monthly || !annual) return null;
 
     const monthlyPrice = monthly.product.priceString;
@@ -210,7 +212,9 @@ export async function checkValueMilestone(totalValue: number): Promise<number | 
 export async function purchasePro(plan: 'monthly' | 'annual', userId?: string): Promise<boolean> {
   void userId;
   const offerings = await Purchases.getOfferings();
-  const pkg = plan === 'annual' ? offerings.current?.annual : offerings.current?.monthly;
+  const pkg = plan === 'annual'
+    ? (offerings.all['TPC Pro Annual']?.availablePackages[0] ?? offerings.current?.annual)
+    : (offerings.all['TPC Pro Monthly']?.availablePackages[0] ?? offerings.current?.monthly);
   if (!pkg) throw new Error('No offerings available. Check RevenueCat dashboard setup.');
 
   const { customerInfo } = await Purchases.purchasePackage(pkg);
