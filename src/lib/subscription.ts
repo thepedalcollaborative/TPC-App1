@@ -31,7 +31,7 @@ const RC_API_KEY = (
 const BETA_FULL_ACCESS = Boolean(
   (extra as Record<string, unknown> | undefined)?.betaFullAccess
 );
-const ENTITLEMENT_ID = 'pro'; // must match the entitlement key in RevenueCat dashboard
+const ENTITLEMENT_ID = 'TPC App Pro'; // must match the entitlement identifier in RevenueCat dashboard
 
 export function hasBetaFullAccess(): boolean {
   return BETA_FULL_ACCESS;
