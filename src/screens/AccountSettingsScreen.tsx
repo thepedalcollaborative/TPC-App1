@@ -27,7 +27,9 @@ export default function AccountSettingsScreen() {
   const navigation = useNavigation();
   const { session, profile, fetchProfile } = useStore();
 
-  const isAppleUser = session?.user?.app_metadata?.provider === 'apple';
+  const provider = session?.user?.app_metadata?.provider;
+  const isOAuthUser = provider === 'apple' || provider === 'google';
+  const isAppleUser = provider === 'apple';
 
   const [activeSection, setActiveSection] = useState<Section>(null);
 
@@ -250,7 +252,7 @@ export default function AccountSettingsScreen() {
         </View>
 
         {/* ── Email (non-Apple only) ── */}
-        {!isAppleUser && (
+        {!isOAuthUser && (
           <>
             <Text style={[styles.sectionLabel, { marginTop: spacing.lg }]}>EMAIL</Text>
             <View style={styles.card}>
@@ -324,7 +326,7 @@ export default function AccountSettingsScreen() {
         )}
 
         {/* ── Password (non-Apple only) ── */}
-        {!isAppleUser && (
+        {!isOAuthUser && (
           <>
             <Text style={[styles.sectionLabel, { marginTop: spacing.lg }]}>PASSWORD</Text>
             <View style={styles.card}>
@@ -415,9 +417,9 @@ export default function AccountSettingsScreen() {
           </>
         )}
 
-        {isAppleUser && (
+        {isOAuthUser && (
           <Text style={styles.appleNote}>
-            Signed in with Apple. Email and password are managed by Apple — visit your Apple ID settings to make changes.
+            Signed in with {isAppleUser ? 'Apple' : 'Google'}. Email and password are managed by your {isAppleUser ? 'Apple ID' : 'Google account'} — make changes there instead.
           </Text>
         )}
 
