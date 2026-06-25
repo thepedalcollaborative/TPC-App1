@@ -573,6 +573,7 @@ export const useStore = create<Store>((set, get) => ({
           pedal_id: up.pedal_id,
           brand: up.pedal.brand,
           model: up.pedal.model,
+          condition: up.condition ?? undefined,
         });
         if (data?.market_value) {
           const { marketValues: current } = get();

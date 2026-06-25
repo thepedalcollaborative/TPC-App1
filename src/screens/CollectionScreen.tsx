@@ -47,6 +47,18 @@ import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
 
+// Reverb-aligned condition taxonomy
+const CONDITIONS = [
+  'Excellent',
+  'Very Good',
+  'Good',
+  'Fair',
+  'Poor',
+  'Non Functioning',
+  'Brand New',
+] as const;
+export type PedalCondition = typeof CONDITIONS[number];
+
 // Date helpers: DB stores YYYY-MM-DD, UI shows MM-DD-YYYY
 const toDisplayDate = (dbDate: string) => {
   const parts = dbDate.split('-');
@@ -360,6 +372,7 @@ export default function CollectionScreen() {
   const [acquiredTradeFor, setAcquiredTradeFor] = useState('');
   const [acquiredTradeWith, setAcquiredTradeWith] = useState('');
   const [acquiredNotes, setAcquiredNotes] = useState('');
+  const [condition, setCondition] = useState<string>('');
   const [serialNumber, setSerialNumber] = useState('');
   const [listingStatus, setListingStatus] = useState<'for_sale' | 'for_trade' | 'for_sale_or_trade' | null>(null);
   const [askingPrice, setAskingPrice] = useState('');
@@ -750,6 +763,7 @@ export default function CollectionScreen() {
     setAcquiredTradeFor(item.acquired_trade_for ?? '');
     setAcquiredTradeWith(item.acquired_trade_with ?? '');
     setAcquiredNotes(item.notes ?? '');
+    setCondition(item.condition ?? '');
     setSerialNumber(item.serial_number ?? '');
     setListingStatus(item.listing_status ?? null);
     setAskingPrice(item.asking_price != null ? String(item.asking_price) : '');
@@ -979,6 +993,7 @@ export default function CollectionScreen() {
       acquired_trade_for: acquiredMethod === 'trade' ? (acquiredTradeFor.trim() || null) : null,
       acquired_trade_with: acquiredMethod === 'trade' ? (acquiredTradeWith.trim() || null) : null,
       notes: acquiredNotes.trim() || null,
+      condition: condition || null,
       serial_number: serialNumber.trim() || null,
       colorway_id: detailColorwayId ?? null,
       category_override: categoryOverride ?? null,
@@ -2300,6 +2315,26 @@ export default function CollectionScreen() {
                   />
                 </>
               )}
+
+              <Text style={styles.fieldLabel}>Condition</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.conditionRow}
+              >
+                {CONDITIONS.map(c => (
+                  <TouchableOpacity
+                    key={c}
+                    style={[styles.conditionChip, condition === c && styles.conditionChipSelected]}
+                    onPress={() => setCondition(prev => prev === c ? '' : c)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.conditionChipText, condition === c && styles.conditionChipTextSelected]}>
+                      {c}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
 
               <Text style={styles.fieldLabel}>Colorway</Text>
               {detailColorways.length > 0 ? (
@@ -5656,6 +5691,32 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textTransform: 'uppercase',
     letterSpacing: 0.8,
+  },
+  conditionRow: {
+    gap: spacing.xs,
+    paddingBottom: 2,
+    paddingTop: 2,
+  },
+  conditionChip: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
+    borderRadius: radius.full,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  conditionChipSelected: {
+    borderColor: colors.teal,
+    backgroundColor: colors.teal + '12',
+  },
+  conditionChipText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodyMedium,
+    color: colors.textSecondary,
+  },
+  conditionChipTextSelected: {
+    color: colors.teal,
+    fontFamily: typography.bodySemiBold,
   },
   colorwayList: {
     gap: spacing.sm,

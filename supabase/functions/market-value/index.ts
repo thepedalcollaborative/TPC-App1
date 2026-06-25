@@ -1,8 +1,8 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-const REVERB_TOKEN = Deno.env.get('REVERB_TOKEN') ?? '';
-const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
+const REVERB_TOKEN      = Deno.env.get('REVERB_TOKEN') ?? '';
+const SUPABASE_URL      = Deno.env.get('SUPABASE_URL') ?? '';
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
 
@@ -12,8 +12,23 @@ const REVERB_HEADERS = {
   'Authorization': `Bearer ${REVERB_TOKEN}`,
 };
 
-// How old cached data can be before we re-fetch (24 hours)
 const CACHE_TTL_HOURS = 24;
+
+// Maps our condition values to the slugs Reverb returns on listing objects
+const CONDITION_SLUG_MAP: Record<string, string[]> = {
+  'Excellent':       ['mint', 'excellent'],
+  'Very Good':       ['very-good'],
+  'Good':            ['good'],
+  'Fair':            ['fair'],
+  'Poor':            ['poor'],
+  'Non Functioning': ['non-functioning'],
+  'Brand New':       ['brand-new', 'b-stock'],
+};
+
+type ReverbListing = {
+  price?: { amount?: string };
+  condition?: { slug?: string };
+};
 
 serve(async (req) => {
   const corsHeaders = {
@@ -45,10 +60,11 @@ serve(async (req) => {
       });
     }
 
-    const { pedal_id, brand, model } = await req.json() as {
+    const { pedal_id, brand, model, condition } = await req.json() as {
       pedal_id: string;
       brand: string;
       model: string;
+      condition?: string;
     };
 
     if (!pedal_id || !brand || !model) {
@@ -58,14 +74,19 @@ serve(async (req) => {
       });
     }
 
+    // Normalize condition to a stable cache key
+    const conditionKey = condition ?? 'used';
+    const conditionSlugs = condition ? (CONDITION_SLUG_MAP[condition] ?? null) : null;
+
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-    // Check cache freshness
+    // Check cache — keyed by (pedal_id, condition)
     const { data: cached } = await supabase
       .from('pedal_market_data')
       .select('*')
       .eq('pedal_id', pedal_id)
-      .single();
+      .eq('condition', conditionKey)
+      .maybeSingle();
 
     if (cached?.updated_at) {
       const ageHours = (Date.now() - new Date(cached.updated_at).getTime()) / 3_600_000;
@@ -78,21 +99,35 @@ serve(async (req) => {
 
     const query = `${brand} ${model}`;
 
+    // Fetch more listings when filtering by condition so we have enough after filtering
+    const perPage = conditionSlugs ? '50' : '20';
+
+    // Filter helper — only applied when the user has set a condition
+    const matchesCondition = (listing: ReverbListing): boolean => {
+      if (!conditionSlugs) return true;
+      const slug = listing.condition?.slug ?? '';
+      return conditionSlugs.some(s => slug === s || slug.startsWith(s));
+    };
+
+    const extractPrices = (listings: ReverbListing[]): number[] =>
+      listings
+        .filter(matchesCondition)
+        .map(l => parseFloat(l.price?.amount ?? '0'))
+        .filter(p => p > 0);
+
     // ── 1. Current used listings ──────────────────────────────────────────────
     const listingsRes = await fetch(
       `https://api.reverb.com/api/listings?` +
         new URLSearchParams({
           query,
           condition: 'used',
-          per_page: '20',
+          per_page: perPage,
           sort: 'price_asc',
         }),
       { headers: REVERB_HEADERS }
     );
     const listingsData = await listingsRes.json();
-    const listings: number[] = (listingsData?.listings ?? [])
-      .map((l: { price?: { amount?: string } }) => parseFloat(l.price?.amount ?? '0'))
-      .filter((p: number) => p > 0);
+    const listings = extractPrices((listingsData?.listings ?? []) as ReverbListing[]);
 
     // ── 2. Sold used listings (last 30 days) ─────────────────────────────────
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3_600_000).toISOString().split('T')[0];
@@ -103,24 +138,21 @@ serve(async (req) => {
           condition: 'used',
           state: 'sold',
           sold_listing_at_gte: thirtyDaysAgo,
-          per_page: '20',
+          per_page: perPage,
         }),
       { headers: REVERB_HEADERS }
     );
     const soldData = await soldRes.json();
-    const sold: number[] = (soldData?.listings ?? [])
-      .map((l: { price?: { amount?: string } }) => parseFloat(l.price?.amount ?? '0'))
-      .filter((p: number) => p > 0);
+    const sold = extractPrices((soldData?.listings ?? []) as ReverbListing[]);
 
-    // ── 3. Compute averages ──────────────────────────────────────────────────
+    // ── 3. Compute weighted average ───────────────────────────────────────────
     const avg = (arr: number[]) =>
       arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
 
     const avgList = avg(listings);
     const avgSold = avg(sold);
 
-    // Sold at full weight (1.0), active listings at half weight (0.5).
-    // Fall back to whichever is available.
+    // Sold at full weight (1.0), active listings at half weight (0.5)
     let marketValue: number | null = null;
     if (avgSold !== null && avgList !== null) {
       marketValue = (avgSold * 1.0 + avgList * 0.5) / 1.5;
@@ -132,6 +164,7 @@ serve(async (req) => {
 
     const row = {
       pedal_id,
+      condition: conditionKey,
       avg_used_list: avgList ? Math.round(avgList) : null,
       avg_used_sold: avgSold ? Math.round(avgSold) : null,
       market_value: marketValue ? Math.round(marketValue) : null,
@@ -139,7 +172,9 @@ serve(async (req) => {
       updated_at: new Date().toISOString(),
     };
 
-    await supabase.from('pedal_market_data').upsert(row, { onConflict: 'pedal_id' });
+    await supabase
+      .from('pedal_market_data')
+      .upsert(row, { onConflict: 'pedal_id,condition' });
 
     return new Response(JSON.stringify(row), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
