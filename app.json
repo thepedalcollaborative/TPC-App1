@@ -31,12 +31,6 @@
       "expo-web-browser",
       "expo-apple-authentication",
       [
-        "react-native-purchases",
-        {
-          "apiKey": "appl_VYQDDIBgZQgjoaTYvVnRfPYeiGu"
-        }
-      ],
-      [
         "expo-notifications",
         {
           "icon": "./assets/icon.png",
