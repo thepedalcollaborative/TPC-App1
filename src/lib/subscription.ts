@@ -15,9 +15,10 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import Purchases, { LOG_LEVEL } from 'react-native-purchases';
 import Constants from 'expo-constants';
 import { Platform, NativeModules } from 'react-native';
+
+type RevenueCatModule = typeof import('react-native-purchases');
 
 // iOS 26.4.x and 26.5.x have a bug where the RN TurboModule interop layer
 // dispatches void method invocations on background threads, bypassing the
@@ -29,9 +30,18 @@ import { Platform, NativeModules } from 'react-native';
 function isAffectediOSVersion(): boolean {
   if (Platform.OS !== 'ios') return false;
   try {
-    const osVersion: string =
-      NativeModules.PlatformConstants?.osVersion ??
-      String(Platform.Version ?? '');
+    const constantsPlatform = Constants.platform as
+      | { ios?: { systemVersion?: string } }
+      | undefined;
+    const candidates = [
+      NativeModules.PlatformConstants?.osVersion,
+      NativeModules.PlatformConstants?.systemVersion,
+      constantsPlatform?.ios?.systemVersion,
+      Platform.Version,
+    ]
+      .filter(value => value !== undefined && value !== null)
+      .map(String);
+    const osVersion = candidates.find(value => /^\d+\.\d+/.test(value)) ?? '';
     // Affected: 26.x where x < 26.6 (i.e., 26.0 through 26.5.x)
     const match = osVersion.match(/^(\d+)\.(\d+)/);
     if (!match) return false;
@@ -68,9 +78,32 @@ export function hasBetaFullAccess(): boolean {
 // unconfigured SDK and writing stale false values to the database.
 let _rcConfigured = false;
 export function isRevenueCatConfigured(): boolean { return _rcConfigured; }
+let _revenueCatModule: RevenueCatModule | null = null;
+let _revenueCatDisabledReason: string | null = null;
 
 function isExpoGoRuntime(): boolean {
   return (Constants as { appOwnership?: string }).appOwnership === 'expo';
+}
+
+function disableRevenueCat(reason: string): void {
+  _rcConfigured = false;
+  _revenueCatDisabledReason = reason;
+}
+
+function loadRevenueCatModule(): RevenueCatModule | null {
+  if (_revenueCatDisabledReason) return null;
+  if (_revenueCatModule) return _revenueCatModule;
+  try {
+    // Keep this lazy. On affected iOS 26.0-26.5 builds, touching the native
+    // RevenueCat TurboModule during launch can abort the app before React draws.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    _revenueCatModule = require('react-native-purchases') as RevenueCatModule;
+    return _revenueCatModule;
+  } catch (err) {
+    disableRevenueCat('RevenueCat native module unavailable');
+    if (__DEV__) console.warn('[TPC] RevenueCat load error:', err);
+    return null;
+  }
 }
 
 /**
@@ -79,23 +112,29 @@ function isExpoGoRuntime(): boolean {
  */
 export function configureRevenueCat(userId?: string): void {
   if (!RC_API_KEY || RC_API_KEY === 'YOUR_REVENUECAT_API_KEY') {
+    disableRevenueCat('RevenueCat API key missing');
     if (__DEV__) console.warn('[TPC] RevenueCat: set revenueCatApiKey in app.json extra');
     return;
   }
   // Skip on iOS 26.4.x / 26.5.x — TurboModule interop bug causes a crash.
   // is_premium stays in sync via RevenueCat webhook instead.
   if (isAffectediOSVersion()) {
+    disableRevenueCat('iOS 26.0-26.5 RevenueCat TurboModule crash guard');
     console.log('[TPC] RevenueCat skipped on iOS 26.4.x/26.5.x (threading bug — fixed in 26.6)');
     return;
   }
   // Expo Go cannot use native IAP with production SDK keys.
   // Keep dev flow clean by skipping RevenueCat setup there.
   if (isExpoGoRuntime() && RC_API_KEY.startsWith('appl_')) {
+    disableRevenueCat('Expo Go runtime with production RevenueCat key');
     if (__DEV__) {
       console.log('[TPC] RevenueCat skipped in Expo Go (production key). Use a dev build for purchases.');
     }
     return;
   }
+  const revenueCat = loadRevenueCatModule();
+  if (!revenueCat) return;
+  const { default: Purchases, LOG_LEVEL } = revenueCat;
   try {
     Purchases.setLogLevel(__DEV__ ? LOG_LEVEL.DEBUG : LOG_LEVEL.ERROR);
     Purchases.configure({ apiKey: RC_API_KEY });
@@ -116,7 +155,10 @@ export async function syncEntitlement(): Promise<boolean> {
   // Without an RC key, getCustomerInfo() returns empty entitlements and would
   // write is_premium: false to the DB — silently demoting manually-set Pro users.
   if (!_rcConfigured) return false;
+  const revenueCat = loadRevenueCatModule();
+  if (!revenueCat) return false;
   try {
+    const Purchases = revenueCat.default;
     const info = await Purchases.getCustomerInfo();
     const isPro = !!info.entitlements.active[ENTITLEMENT_ID];
     return isPro;
@@ -144,7 +186,11 @@ export type LivePrices = {
  * should fall back to the PRICE_* constants in that case.
  */
 export async function fetchLivePrices(): Promise<LivePrices | null> {
+  if (!_rcConfigured) return null;
+  const revenueCat = loadRevenueCatModule();
+  if (!revenueCat) return null;
   try {
+    const Purchases = revenueCat.default;
     const offerings = await Purchases.getOfferings();
     const monthly = offerings.all['TPC Pro Monthly']?.availablePackages[0]
       ?? offerings.current?.monthly;
@@ -243,6 +289,14 @@ export async function checkValueMilestone(totalValue: number): Promise<number | 
  */
 export async function purchasePro(plan: 'monthly' | 'annual', userId?: string): Promise<boolean> {
   void userId;
+  if (!_rcConfigured) {
+    throw new Error(_revenueCatDisabledReason ?? 'Purchases are unavailable on this device.');
+  }
+  const revenueCat = loadRevenueCatModule();
+  if (!revenueCat) {
+    throw new Error(_revenueCatDisabledReason ?? 'Purchases are unavailable on this device.');
+  }
+  const Purchases = revenueCat.default;
   const offerings = await Purchases.getOfferings();
   const pkg = plan === 'annual'
     ? (offerings.all['TPC Pro Annual']?.availablePackages[0] ?? offerings.current?.annual)
@@ -260,6 +314,14 @@ export async function purchasePro(plan: 'monthly' | 'annual', userId?: string): 
  */
 export async function restorePurchases(userId?: string): Promise<boolean> {
   void userId;
+  if (!_rcConfigured) {
+    throw new Error(_revenueCatDisabledReason ?? 'Purchases are unavailable on this device.');
+  }
+  const revenueCat = loadRevenueCatModule();
+  if (!revenueCat) {
+    throw new Error(_revenueCatDisabledReason ?? 'Purchases are unavailable on this device.');
+  }
+  const Purchases = revenueCat.default;
   const info = await Purchases.restorePurchases();
   const isPro = !!info.entitlements.active[ENTITLEMENT_ID];
   return isPro;
