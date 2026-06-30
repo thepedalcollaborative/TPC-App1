@@ -22,7 +22,8 @@
         "NSPhotoLibraryUsageDescription": "Allow access to select pedal photos.",
         "NSPhotoLibraryAddUsageDescription": "Allow access to save pedal photos.",
         "ITSAppUsesNonExemptEncryption": false
-      }
+      },
+      "appleTeamId": "33ABU38ZLF"
     },
     "plugins": [
       "expo-font",
