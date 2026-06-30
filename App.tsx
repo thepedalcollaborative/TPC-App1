@@ -689,17 +689,22 @@ export default function App() {
     </>
   );
 
+  // On iOS 26.0–26.5, both GestureHandlerRootView.install() and
+  // SafeAreaProvider dispatch void TurboModule methods on background GCD
+  // threads, which aborts the process. Skip both on affected versions.
+  if (AFFECTED_IOS) {
+    return (
+      <View style={{ flex: 1, paddingTop: Constants.statusBarHeight }}>
+        {appInner}
+      </View>
+    );
+  }
+
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      {AFFECTED_IOS ? (
-        <View style={{ flex: 1, paddingTop: Constants.statusBarHeight }}>
-          {appInner}
-        </View>
-      ) : (
-        <SafeAreaProvider>
-          {appInner}
-        </SafeAreaProvider>
-      )}
+      <SafeAreaProvider>
+        {appInner}
+      </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }
