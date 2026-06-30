@@ -28,9 +28,6 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
-import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import type { RootStackParamList } from '../types/navigation';
 import { colors, typography, spacing, radius, gradients } from '../theme';
 
 const tpcLogo = require('../../assets/splash-icon.png');
@@ -40,6 +37,7 @@ const tpcLogo = require('../../assets/splash-icon.png');
 type WelcomeOnboardingProps = {
   onGetStarted: () => void;
   onSignIn: () => void;
+  onShowLegal?: (tab: 'terms' | 'privacy') => void;
 };
 
 type SlideData = {
@@ -470,10 +468,9 @@ const hookVisual = StyleSheet.create({
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export function WelcomeOnboarding({ onGetStarted, onSignIn }: WelcomeOnboardingProps) {
+export function WelcomeOnboarding({ onGetStarted, onSignIn, onShowLegal }: WelcomeOnboardingProps) {
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const flatRef = useRef<FlatList>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const slides = buildSlides();
@@ -588,14 +585,14 @@ export function WelcomeOnboarding({ onGetStarted, onSignIn }: WelcomeOnboardingP
             {'By continuing, you agree to our '}
             <Text
               style={styles.legalLink}
-              onPress={() => navigation.navigate('Legal', { tab: 'terms' })}
+              onPress={() => onShowLegal?.('terms')}
             >
               Terms of Service
             </Text>
             {' and '}
             <Text
               style={styles.legalLink}
-              onPress={() => navigation.navigate('Legal', { tab: 'privacy' })}
+              onPress={() => onShowLegal?.('privacy')}
             >
               Privacy Policy
             </Text>

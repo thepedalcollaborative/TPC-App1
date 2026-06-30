@@ -20,6 +20,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Linking from 'expo-linking';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { isAffectedIOSVersion } from './src/lib/iosVersion';
 import { supabase } from './src/lib/supabase';
 import { useStore } from './src/hooks/useStore';
 import { configureRevenueCat, syncEntitlement, hasBetaFullAccess } from './src/lib/subscription';
@@ -53,6 +54,11 @@ import ChatHistoryScreen from './src/screens/ChatHistoryScreen';
 import LegalScreen from './src/screens/LegalScreen';
 import PublicProfileScreen from './src/screens/PublicProfileScreen';
 import AccountSettingsScreen from './src/screens/AccountSettingsScreen';
+
+// Computed once at JS bundle load, before any component mounts or native module
+// void methods are invoked. Used to gate SafeAreaProvider (which calls UIKit
+// via TurboModule interop and crashes on iOS 26.0–26.5).
+const AFFECTED_IOS = isAffectedIOSVersion();
 
 // Defensive wrapper — prevents crash if native module isn't linked in Expo Go
 try { SplashScreen.preventAutoHideAsync(); } catch { /* no-op */ }
@@ -531,6 +537,11 @@ export default function App() {
       <WelcomeOnboarding
         onGetStarted={dismissWelcome}
         onSignIn={dismissWelcome}
+        onShowLegal={(tab) => {
+          if (navigationRef.isReady()) {
+            (navigationRef.navigate as any)('Legal', { tab });
+          }
+        }}
       />
     ) : (
       <AuthScreen />
@@ -574,9 +585,13 @@ export default function App() {
     </NavigationContainer>
   );
 
-  return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
-    <SafeAreaProvider>
+  // On iOS 26.0–26.5, SafeAreaProvider calls native UIKit methods via the
+  // TurboModule interop layer on a background thread. This throws an ObjC
+  // exception that aborts the process (crash in performVoidMethodInvocation).
+  // Apple fixed this in 26.6. Use a plain View with manual status-bar padding
+  // as a fallback so the app opens on affected devices.
+  const appInner = (
+    <>
       <StatusBar style="light" />
       <View style={styles.appRoot}>
         {baseContent}
@@ -671,7 +686,20 @@ export default function App() {
           </View>
         )}
       </View>
-    </SafeAreaProvider>
+    </>
+  );
+
+  return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      {AFFECTED_IOS ? (
+        <View style={{ flex: 1, paddingTop: Constants.statusBarHeight }}>
+          {appInner}
+        </View>
+      ) : (
+        <SafeAreaProvider>
+          {appInner}
+        </SafeAreaProvider>
+      )}
     </GestureHandlerRootView>
   );
 }

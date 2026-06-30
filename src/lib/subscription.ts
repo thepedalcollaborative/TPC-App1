@@ -16,43 +16,9 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
-import { Platform, NativeModules } from 'react-native';
+import { isAffectedIOSVersion } from './iosVersion';
 
 type RevenueCatModule = typeof import('react-native-purchases');
-
-// iOS 26.4.x and 26.5.x have a bug where the RN TurboModule interop layer
-// dispatches void method invocations on background threads, bypassing the
-// methodQueue = main_queue declaration in RNPurchases. When RevenueCat's
-// native code touches Apple frameworks from a background thread on these
-// iOS versions, an ObjC exception is thrown that crashes the app.
-// Apple fixed this in iOS 26.6. We skip RevenueCat init on affected builds
-// and rely on the webhook to keep is_premium in sync.
-function isAffectediOSVersion(): boolean {
-  if (Platform.OS !== 'ios') return false;
-  try {
-    const constantsPlatform = Constants.platform as
-      | { ios?: { systemVersion?: string } }
-      | undefined;
-    const candidates = [
-      NativeModules.PlatformConstants?.osVersion,
-      NativeModules.PlatformConstants?.systemVersion,
-      constantsPlatform?.ios?.systemVersion,
-      Platform.Version,
-    ]
-      .filter(value => value !== undefined && value !== null)
-      .map(String);
-    const osVersion = candidates.find(value => /^\d+\.\d+/.test(value)) ?? '';
-    // Affected: 26.x where x < 26.6 (i.e., 26.0 through 26.5.x)
-    const match = osVersion.match(/^(\d+)\.(\d+)/);
-    if (!match) return false;
-    const major = parseInt(match[1], 10);
-    const minor = parseInt(match[2], 10);
-    if (major !== 26) return false;
-    return minor < 6; // 26.0–26.5.x are affected; 26.6+ is fine
-  } catch {
-    return false;
-  }
-}
 
 // ─── RevenueCat config ────────────────────────────────────────────────────────
 const extra =
@@ -118,7 +84,7 @@ export function configureRevenueCat(userId?: string): void {
   }
   // Skip on iOS 26.4.x / 26.5.x — TurboModule interop bug causes a crash.
   // is_premium stays in sync via RevenueCat webhook instead.
-  if (isAffectediOSVersion()) {
+  if (isAffectedIOSVersion()) {
     disableRevenueCat('iOS 26.0-26.5 RevenueCat TurboModule crash guard');
     console.log('[TPC] RevenueCat skipped on iOS 26.4.x/26.5.x (threading bug — fixed in 26.6)');
     return;
