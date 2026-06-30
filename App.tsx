@@ -20,6 +20,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Linking from 'expo-linking';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { enableScreens } from 'react-native-screens';
 import { isAffectedIOSVersion } from './src/lib/iosVersion';
 import { supabase } from './src/lib/supabase';
 import { useStore } from './src/hooks/useStore';
@@ -56,9 +57,18 @@ import PublicProfileScreen from './src/screens/PublicProfileScreen';
 import AccountSettingsScreen from './src/screens/AccountSettingsScreen';
 
 // Computed once at JS bundle load, before any component mounts or native module
-// void methods are invoked. Used to gate SafeAreaProvider (which calls UIKit
-// via TurboModule interop and crashes on iOS 26.0–26.5).
+// void methods are invoked. On iOS 26.0–26.5, RN 0.81's TurboModule interop
+// dispatches void methods on background GCD threads, which causes any UIKit
+// access to throw an ObjC NSException that aborts the process. Apple fixed
+// this in iOS 26.6. We gate all UIKit-touching modules on this flag.
 const AFFECTED_IOS = isAffectedIOSVersion();
+
+// Prevent react-native-screens from calling UIKit void methods via TurboModule.
+// enableScreens(false) only sets a JS flag — it does NOT call any native method,
+// so it is safe to call unconditionally on AFFECTED_IOS.
+if (AFFECTED_IOS) {
+  try { enableScreens(false); } catch { /* no-op */ }
+}
 
 // Defensive wrapper — prevents crash if native module isn't linked in Expo Go
 try { SplashScreen.preventAutoHideAsync(); } catch { /* no-op */ }
@@ -471,7 +481,9 @@ export default function App() {
     // trusted server-side paths such as RevenueCat webhooks and Patreon connect.
     syncEntitlement().catch(() => {});
     fetchProfile();
-    // Request notification permissions and schedule recurring reminders on sign-in
+    // Notification native module calls UIKit void methods via TurboModule on
+    // background threads — skip entirely on iOS 26.0–26.5.
+    if (AFFECTED_IOS) return;
     requestNotificationPermissions().then(granted => {
       if (!granted) return;
       scheduleWeeklyPickNotification().catch(() => {});
@@ -546,6 +558,17 @@ export default function App() {
     ) : (
       <AuthScreen />
     )
+  ) : AFFECTED_IOS ? (
+    // NavigationContainer + NativeStackNavigator call UIKit void methods via
+    // TurboModule interop on background threads, aborting the process on iOS
+    // 26.0–26.5. Show a plain upgrade prompt until the user is on iOS 26.6+.
+    <View style={styles.upgradeRoot}>
+      <Text style={styles.upgradeTitle}>Update Required</Text>
+      <Text style={styles.upgradeBody}>
+        The Pedal Collaborative requires iOS 26.6 or later.{'\n\n'}
+        Go to Settings {'>'} General {'>'} Software Update to upgrade.
+      </Text>
+    </View>
   ) : (
     <NavigationContainer ref={navigationRef}>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
@@ -747,5 +770,26 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: typography.bodyMedium,
     marginTop: 2,
+  },
+  upgradeRoot: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 32,
+    backgroundColor: colors.background,
+  },
+  upgradeTitle: {
+    color: colors.text,
+    fontSize: 20,
+    fontFamily: typography.bodySemiBold,
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+  upgradeBody: {
+    color: colors.textMuted,
+    fontSize: 15,
+    fontFamily: typography.body,
+    textAlign: 'center',
+    lineHeight: 22,
   },
 });
