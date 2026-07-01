@@ -1045,8 +1045,10 @@ export default function CollectionScreen() {
 
     if (error) {
       setSavingDetails(false);
+      if (__DEV__) console.warn('[saveDetail] Supabase error:', error);
       const classified = classifyError(error, { httpStatus: extractHttpStatus(error) });
-      Alert.alert(classified.title, classified.message);
+      const detail = (error as { message?: string })?.message;
+      Alert.alert(classified.title, detail || classified.message);
       return;
     }
 

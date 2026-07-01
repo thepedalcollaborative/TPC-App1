@@ -13,6 +13,7 @@ import {
 } from '@expo-google-fonts/inter';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { createStackNavigator } from '@react-navigation/stack';
 import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -74,10 +75,20 @@ if (AFFECTED_IOS) {
 try { SplashScreen.preventAutoHideAsync(); } catch { /* no-op */ }
 
 const Tab = createBottomTabNavigator();
-const Stack = createNativeStackNavigator<RootStackParamList>();
-const HomeStack = createNativeStackNavigator<HomeStackParamList>();
-const BoardsStack = createNativeStackNavigator<BoardsStackParamList>();
-const AIStack = createNativeStackNavigator<AIStackParamList>();
+
+// On iOS 26.0–26.5, NativeStackNavigator calls RNScreens UIKit void methods on
+// background GCD threads → ObjC NSException → abort. The pure-JS StackNavigator
+// avoids all native stack module calls; enableScreens(false) ensures Screen/
+// ScreenContainer fall back to plain Views. Swipe-back is unavailable on
+// affected iOS but the app is fully functional.
+const _makeStack = AFFECTED_IOS
+  ? createStackNavigator as unknown as typeof createNativeStackNavigator
+  : createNativeStackNavigator;
+
+const Stack = _makeStack<RootStackParamList>();
+const HomeStack = _makeStack<HomeStackParamList>();
+const BoardsStack = _makeStack<BoardsStackParamList>();
+const AIStack = _makeStack<AIStackParamList>();
 
 const navigationRef = createNavigationContainerRef();
 
@@ -558,17 +569,6 @@ export default function App() {
     ) : (
       <AuthScreen />
     )
-  ) : AFFECTED_IOS ? (
-    // NavigationContainer + NativeStackNavigator call UIKit void methods via
-    // TurboModule interop on background threads, aborting the process on iOS
-    // 26.0–26.5. Show a plain upgrade prompt until the user is on iOS 26.6+.
-    <View style={styles.upgradeRoot}>
-      <Text style={styles.upgradeTitle}>Update Required</Text>
-      <Text style={styles.upgradeBody}>
-        The Pedal Collaborative requires iOS 26.6 or later.{'\n\n'}
-        Go to Settings {'>'} General {'>'} Software Update to upgrade.
-      </Text>
-    </View>
   ) : (
     <NavigationContainer ref={navigationRef}>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
@@ -770,26 +770,5 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: typography.bodyMedium,
     marginTop: 2,
-  },
-  upgradeRoot: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 32,
-    backgroundColor: colors.background,
-  },
-  upgradeTitle: {
-    color: colors.text,
-    fontSize: 20,
-    fontFamily: typography.bodySemiBold,
-    marginBottom: 16,
-    textAlign: 'center',
-  },
-  upgradeBody: {
-    color: colors.textMuted,
-    fontSize: 15,
-    fontFamily: typography.body,
-    textAlign: 'center',
-    lineHeight: 22,
   },
 });
