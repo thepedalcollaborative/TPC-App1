@@ -224,7 +224,7 @@ function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
 
 function HomeStackNavigator() {
   return (
-    <HomeStack.Navigator screenOptions={{ headerShown: false }}>
+    <HomeStack.Navigator screenOptions={{ headerShown: false, gestureEnabled: !AFFECTED_IOS }}>
       <HomeStack.Screen name="HomeMain" component={HomeScreen} />
       <HomeStack.Screen name="Finder" component={FinderScreen} />
     </HomeStack.Navigator>
@@ -233,7 +233,7 @@ function HomeStackNavigator() {
 
 function BoardsStackNavigator() {
   return (
-    <BoardsStack.Navigator screenOptions={{ headerShown: false }}>
+    <BoardsStack.Navigator screenOptions={{ headerShown: false, gestureEnabled: !AFFECTED_IOS }}>
       <BoardsStack.Screen name="BoardsMain" component={BoardsScreen} />
       <BoardsStack.Screen name="BoardDetail" component={BoardDetailScreen} />
     </BoardsStack.Navigator>
@@ -242,7 +242,7 @@ function BoardsStackNavigator() {
 
 function AIStackNavigator() {
   return (
-    <AIStack.Navigator screenOptions={{ headerShown: false }}>
+    <AIStack.Navigator screenOptions={{ headerShown: false, gestureEnabled: !AFFECTED_IOS }}>
       <AIStack.Screen name="Advisor" component={AdvisorScreen} />
       <AIStack.Screen name="Finder"  component={FinderScreen} />
       <AIStack.Screen name="AIHub"   component={AIHubScreen} />
@@ -571,7 +571,7 @@ export default function App() {
     )
   ) : (
     <NavigationContainer ref={navigationRef}>
-      <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Navigator screenOptions={{ headerShown: false, gestureEnabled: !AFFECTED_IOS }}>
         <Stack.Screen name="Main" component={MainTabs} />
         <Stack.Screen name="Profile" component={ProfileScreen} />
         <Stack.Screen
@@ -582,27 +582,27 @@ export default function App() {
         <Stack.Screen
           name="GearHistory"
           component={GearHistoryScreen}
-          options={{ animation: 'slide_from_right', gestureEnabled: true }}
+          options={{ animation: 'slide_from_right', gestureEnabled: !AFFECTED_IOS }}
         />
         <Stack.Screen
           name="ChatHistory"
           component={ChatHistoryScreen}
-          options={{ animation: 'slide_from_right', gestureEnabled: true }}
+          options={{ animation: 'slide_from_right', gestureEnabled: !AFFECTED_IOS }}
         />
         <Stack.Screen
           name="Legal"
           component={LegalScreen}
-          options={{ animation: 'slide_from_right', gestureEnabled: true }}
+          options={{ animation: 'slide_from_right', gestureEnabled: !AFFECTED_IOS }}
         />
         <Stack.Screen
           name="PublicProfile"
           component={PublicProfileScreen}
-          options={{ animation: 'slide_from_right', gestureEnabled: true }}
+          options={{ animation: 'slide_from_right', gestureEnabled: !AFFECTED_IOS }}
         />
         <Stack.Screen
           name="AccountSettings"
           component={AccountSettingsScreen}
-          options={{ animation: 'slide_from_right', gestureEnabled: true }}
+          options={{ animation: 'slide_from_right', gestureEnabled: !AFFECTED_IOS }}
         />
       </Stack.Navigator>
     </NavigationContainer>
