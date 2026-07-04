@@ -304,20 +304,38 @@ serve(async (req) => {
     // and never for memory summarization.
     const allowWebSearch = Boolean(enableWebSearch) && purpose !== 'memory' && isProUser;
 
-    // ── Recent pedals feed ────────────────────────────────────────────────────
-    // Inject a compact "recently trending" block into the system prompt so
-    // Claude has real-time awareness of new gear without burning a search call.
-    let recentPedalsFeed = '';
-    try {
-      const { data: recentPedals } = await adminClient
-        .from('recent_pedals')
-        .select('brand, model, category, avg_price, listing_count')
-        .gt('last_seen_at', new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString())
-        .order('listing_count', { ascending: false })
-        .limit(40);
+    // ── Dynamic data injection (parallel fetches) ────────────────────────────
+    // Three blocks assembled here and injected after the cached system prompt:
+    //   1. recentPedalsFeed  — Reverb market data (trending/pricing awareness)
+    //   2. tpcCatalogBlock   — TPC's own pedal catalog (filtered to user's categories)
+    //   3. tpcCommunityBlock — Anonymized user behavior signals with min-threshold
 
-      if (recentPedals && recentPedals.length > 0) {
-        const lines = recentPedals.map((p: {
+    let recentPedalsFeed = '';
+    let tpcCatalogBlock = '';
+    let tpcCommunityBlock = '';
+
+    try {
+      const [recentPedalsRes, userPedalsRes, userCountRes] = await Promise.all([
+        adminClient
+          .from('recent_pedals')
+          .select('brand, model, category, avg_price, listing_count')
+          .gt('last_seen_at', new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString())
+          .order('listing_count', { ascending: false })
+          .limit(40),
+        adminClient
+          .from('user_pedals')
+          .select('pedals(category)')
+          .eq('user_id', user.id)
+          .in('status', ['owned', 'wishlist'])
+          .limit(100),
+        adminClient
+          .from('user_profiles')
+          .select('id', { count: 'exact', head: true }),
+      ]);
+
+      // 1. Reverb feed
+      if (recentPedalsRes.data && recentPedalsRes.data.length > 0) {
+        const lines = recentPedalsRes.data.map((p: {
           brand: string; model: string; category: string | null;
           avg_price: number | null; listing_count: number;
         }) => {
@@ -327,8 +345,73 @@ serve(async (req) => {
         }).join('\n');
         recentPedalsFeed = `\n\nRECENTLY ACTIVE ON REVERB (last 60 days — use this for current awareness):\n${lines}`;
       }
+
+      // 2. TPC catalog — prefer user's categories, fall back to all recent imports
+      const rawCats = (userPedalsRes.data ?? [])
+        .map((row: { pedals: { category: string } | null }) => row.pedals?.category)
+        .filter(Boolean) as string[];
+      const userCategories = [...new Set(rawCats)];
+
+      const catalogQuery = adminClient
+        .from('pedals')
+        .select('brand, model, category, subcategory, tone_dna, price_usd, in_production, analog')
+        .order('imported_at', { ascending: false, nullsFirst: false })
+        .limit(50);
+      if (userCategories.length > 0) {
+        catalogQuery.in('category', userCategories);
+      }
+      const { data: catalogPedals } = await catalogQuery;
+
+      if (catalogPedals && catalogPedals.length > 0) {
+        const lines = catalogPedals.map((p: {
+          brand: string; model: string; category: string | null;
+          subcategory: string | null; tone_dna: string | null;
+          price_usd: number | null; in_production: boolean | null;
+          analog: boolean | null;
+        }) => {
+          const cat = [p.category, p.subcategory].filter(Boolean).join('/');
+          const price = p.price_usd ? ` $${p.price_usd}` : '';
+          const flags = [
+            p.analog === true ? 'analog' : p.analog === false ? 'digital' : null,
+            p.in_production === false ? 'discontinued' : null,
+          ].filter(Boolean).join(', ');
+          const flagStr = flags ? ` (${flags})` : '';
+          const dna = p.tone_dna ? ` — ${p.tone_dna}` : '';
+          return `• ${p.brand} ${p.model} [${cat}]${price}${flagStr}${dna}`;
+        }).join('\n');
+        tpcCatalogBlock = `\n\nTPC PEDAL CATALOG (community-curated database — use this for accurate specs and pricing):\n${lines}`;
+      }
+
+      // 3. Community signals — minimum threshold before surfacing any signal
+      const userCount = userCountRes.count ?? 0;
+      const threshold = userCount >= 50 ? Math.ceil(userCount * 0.10) : 3;
+
+      const { data: signals } = await adminClient
+        .from('tpc_community_signals')
+        .select('brand, model, recent_acquisitions, wishlist_count, total_owners')
+        .or(`recent_acquisitions.gte.${threshold},wishlist_count.gte.${threshold}`)
+        .order('recent_acquisitions', { ascending: false })
+        .limit(15);
+
+      if (signals && signals.length > 0) {
+        const lines = signals.map((s: {
+          brand: string; model: string;
+          recent_acquisitions: number; wishlist_count: number; total_owners: number;
+        }) => {
+          const parts: string[] = [];
+          if (s.recent_acquisitions >= threshold) {
+            parts.push(`${s.recent_acquisitions} TPC member${s.recent_acquisitions !== 1 ? 's' : ''} added this month`);
+          }
+          if (s.wishlist_count >= threshold) {
+            parts.push(`${s.wishlist_count} have it on their wishlist`);
+          }
+          return `• ${s.brand} ${s.model} — ${parts.join('; ')} (${s.total_owners} total owners in TPC)`;
+        }).join('\n');
+        tpcCommunityBlock = `\n\nTPC COMMUNITY SIGNALS (anonymized — only shown when ${threshold}+ members agree):\n${lines}`;
+      }
+
     } catch (e) {
-      console.warn('[tpc-advisor] recent_pedals fetch failed:', (e as Error).message);
+      console.warn('[tpc-advisor] data injection failed:', (e as Error).message);
     }
 
     const model = (requestedModel && MODELS_BY_PURPOSE[purpose].has(requestedModel))
@@ -353,11 +436,13 @@ serve(async (req) => {
     const shouldStream = stream && !hasTools;
 
     // Wrap system prompt in a caching block. Static context is cached;
-    // the small dynamic recentPedalsFeed suffix is appended outside the cache.
+    // all dynamic blocks (Reverb feed, TPC catalog, community signals) are
+    // appended after the cache boundary so they're always fresh.
+    const dynamicSuffix = recentPedalsFeed + tpcCatalogBlock + tpcCommunityBlock;
     const systemBlock = systemPrompt
       ? [
           { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
-          ...(recentPedalsFeed ? [{ type: 'text', text: recentPedalsFeed }] : []),
+          ...(dynamicSuffix ? [{ type: 'text', text: dynamicSuffix }] : []),
         ]
       : undefined;
 
