@@ -2339,33 +2339,41 @@ export default function CollectionScreen() {
               </ScrollView>
 
               <Text style={styles.fieldLabel}>Colorway</Text>
-              {detailColorways.length > 0 ? (
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.colorwayList}
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.colorwayList}
+              >
+                {/* Standard = no colorway, use primary image */}
+                <TouchableOpacity
+                  style={[styles.colorwayChip, detailColorwayId === null && styles.colorwayChipSelected]}
+                  onPress={() => setDetailColorwayId(null)}
                 >
-                  {detailColorways.map(cw => {
-                    const isSelected = detailColorwayId === cw.id;
-                    return (
-                      <TouchableOpacity
-                        key={cw.id}
-                        style={[styles.colorwayChip, isSelected && styles.colorwayChipSelected]}
-                        onPress={() => setDetailColorwayId(cw.id)}
-                      >
-                        {cw.color_hex && (
-                          <View style={[styles.colorwaySwatch, { backgroundColor: cw.color_hex }]} />
-                        )}
-                        <Text style={[styles.colorwayChipText, isSelected && styles.colorwayChipTextSelected]}>
-                          {cw.name}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </ScrollView>
-                      ) : (
-                        <Text style={styles.helperText}>No colorways found for this pedal.</Text>
+                  {detailPedal?.pedal?.image_url ? (
+                    <Image source={{ uri: detailPedal.pedal.image_url }} style={styles.colorwaySwatch} contentFit="cover" />
+                  ) : null}
+                  <Text style={[styles.colorwayChipText, detailColorwayId === null && styles.colorwayChipTextSelected]}>
+                    Standard
+                  </Text>
+                </TouchableOpacity>
+                {detailColorways.map(cw => {
+                  const isSelected = detailColorwayId === cw.id;
+                  return (
+                    <TouchableOpacity
+                      key={cw.id}
+                      style={[styles.colorwayChip, isSelected && styles.colorwayChipSelected]}
+                      onPress={() => setDetailColorwayId(cw.id)}
+                    >
+                      {cw.color_hex && (
+                        <View style={[styles.colorwaySwatch, { backgroundColor: cw.color_hex }]} />
                       )}
+                      <Text style={[styles.colorwayChipText, isSelected && styles.colorwayChipTextSelected]}>
+                        {cw.name}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
 
                       <Text style={styles.fieldLabel}>Category</Text>
                       <ScrollView
@@ -4024,6 +4032,19 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
                       showsHorizontalScrollIndicator={false}
                       contentContainerStyle={styles.colorwayList}
                     >
+                      {/* Standard = no colorway, use primary image */}
+                      <TouchableOpacity
+                        style={[styles.colorwayChip, selectedColorwayId === null && styles.colorwayChipSelected]}
+                        onPress={() => { Haptics.selectionAsync(); setSelectedColorwayId(null); }}
+                        activeOpacity={0.7}
+                      >
+                        {selectedPedal?.image_url ? (
+                          <Image source={{ uri: selectedPedal.image_url }} style={styles.colorwaySwatch} contentFit="cover" />
+                        ) : null}
+                        <Text style={[styles.colorwayChipText, selectedColorwayId === null && styles.colorwayChipTextSelected]}>
+                          Standard
+                        </Text>
+                      </TouchableOpacity>
                       {colorways.map(cw => {
                         const isSelected = selectedColorwayId === cw.id;
                         return (
