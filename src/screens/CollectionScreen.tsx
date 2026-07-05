@@ -4331,8 +4331,8 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
                 <Text style={styles.searchHint}>Start typing to search the catalog and Reverb...</Text>
               )}
 
-              {/* Catalog results */}
-              {results.map(pedal => (
+              {/* Catalog results — verified first */}
+              {[...results].sort((a, b) => (b.is_verified ? 1 : 0) - (a.is_verified ? 1 : 0)).map(pedal => (
                 <TouchableOpacity
                   key={pedal.id}
                   style={styles.resultRow}
@@ -4348,7 +4348,12 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
                       </View>
                     )}
                     <View style={styles.resultRowText}>
-                      <Text style={styles.resultBrand}>{pedal.brand}</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                        <Text style={styles.resultBrand}>{pedal.brand}</Text>
+                        {pedal.is_verified && (
+                          <Image source={require('../../assets/tpc-square.png')} style={{ width: 13, height: 13 }} contentFit="contain" />
+                        )}
+                      </View>
                       <Text style={styles.resultModel}>{pedal.model}</Text>
                     </View>
                     <View style={styles.resultRowRight}>
@@ -4365,9 +4370,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
               {reverbResults.length > 0 && (
                 <>
                   {results.length > 0 && (
-                    <View style={styles.reverbDivider}>
-                      <Text style={styles.reverbDividerText}>Also found on Reverb</Text>
-                    </View>
+                    <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginVertical: 6, marginHorizontal: 4 }} />
                   )}
                   {reverbResults.map((r, i) => (
                     <TouchableOpacity
