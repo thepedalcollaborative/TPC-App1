@@ -4387,8 +4387,8 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
                 </TouchableOpacity>
               ))}
 
-              {/* Reverb-sourced results not yet in catalog */}
-              {reverbResults.length > 0 && (
+              {/* Reverb-sourced results — suppressed when a verified catalog match exists */}
+              {reverbResults.length > 0 && !results.some(p => p.is_verified) && (
                 <>
                   {results.length > 0 && (
                     <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginVertical: 6, marginHorizontal: 4 }} />
