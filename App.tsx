@@ -504,12 +504,14 @@ export default function App() {
 
   // Keep the weekly vault digest content in sync with live collection/value.
   useEffect(() => {
+    if (AFFECTED_IOS) return;
     if (!session?.user?.id) return;
     scheduleVaultDigestNotification(ownedPedals.length, totalMarketValue).catch(() => {});
   }, [session?.user?.id, ownedPedals.length, totalMarketValue]);
 
   // Cancel notifications on sign-out
   useEffect(() => {
+    if (AFFECTED_IOS) return;
     if (!session) {
       cancelAllTpcNotifications().catch(() => {});
     }
@@ -517,6 +519,7 @@ export default function App() {
 
   // Re-engagement notification — reset 4-day clock every time app comes to foreground
   useEffect(() => {
+    if (AFFECTED_IOS) return;
     if (!session) return;
     // Schedule immediately on mount (first open of the session)
     scheduleReengagementNotification(wishlistPedals.length).catch(() => {});
