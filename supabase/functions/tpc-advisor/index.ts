@@ -354,9 +354,18 @@ serve(async (req) => {
 
       const catalogQuery = adminClient
         .from('pedals')
-        .select('brand, model, category, subcategory, tone_dna, price_usd, in_production, analog')
+        .select([
+          'brand', 'model', 'category', 'subcategory', 'version_label',
+          'tone_dna', 'price_usd', 'in_production', 'analog',
+          'true_bypass', 'midi', 'midi_notes', 'presets', 'preset_count',
+          'power_requirements', 'mono_stereo', 'dimensions',
+          'manual_url', 'midi_manual_url', 'quick_start_url',
+          'is_verified',
+        ].join(', '))
+        .is('merged_into', null)
+        .order('is_verified', { ascending: false })
         .order('imported_at', { ascending: false, nullsFirst: false })
-        .limit(50);
+        .limit(60);
       if (userCategories.length > 0) {
         catalogQuery.in('category', userCategories);
       }
@@ -365,21 +374,41 @@ serve(async (req) => {
       if (catalogPedals && catalogPedals.length > 0) {
         const lines = catalogPedals.map((p: {
           brand: string; model: string; category: string | null;
-          subcategory: string | null; tone_dna: string | null;
-          price_usd: number | null; in_production: boolean | null;
-          analog: boolean | null;
+          subcategory: string | null; version_label: string | null;
+          tone_dna: string | null; price_usd: number | null;
+          in_production: boolean | null; analog: boolean | null;
+          true_bypass: boolean | null; midi: boolean | null;
+          midi_notes: string | null; presets: boolean | null;
+          preset_count: number | null; power_requirements: string | null;
+          mono_stereo: string | null; dimensions: string | null;
+          manual_url: string | null; midi_manual_url: string | null;
+          quick_start_url: string | null; is_verified: boolean | null;
         }) => {
           const cat = [p.category, p.subcategory].filter(Boolean).join('/');
+          const version = p.version_label ? ` ${p.version_label}` : '';
+          const verified = p.is_verified ? ' [TPC VERIFIED]' : '';
           const price = p.price_usd ? ` $${p.price_usd}` : '';
           const flags = [
             p.analog === true ? 'analog' : p.analog === false ? 'digital' : null,
             p.in_production === false ? 'discontinued' : null,
+            p.true_bypass ? 'true bypass' : null,
+            p.mono_stereo ? p.mono_stereo.replace(/_/g, ' ') : null,
+            p.midi ? (p.midi_notes ? `MIDI (${p.midi_notes})` : 'MIDI') : null,
+            p.presets && p.preset_count ? `${p.preset_count} presets` : p.presets ? 'presets' : null,
           ].filter(Boolean).join(', ');
           const flagStr = flags ? ` (${flags})` : '';
-          const dna = p.tone_dna ? ` — ${p.tone_dna}` : '';
-          return `• ${p.brand} ${p.model} [${cat}]${price}${flagStr}${dna}`;
+          const power = p.power_requirements ? ` | Power: ${p.power_requirements}` : '';
+          const dims = p.dimensions ? ` | Size: ${p.dimensions}` : '';
+          const dna = p.tone_dna ? `\n  Sound: ${p.tone_dna}` : '';
+          const docs = [
+            p.manual_url ? `manual: ${p.manual_url}` : null,
+            p.midi_manual_url ? `MIDI manual: ${p.midi_manual_url}` : null,
+            p.quick_start_url ? `quick start: ${p.quick_start_url}` : null,
+          ].filter(Boolean).join(', ');
+          const docsStr = docs ? `\n  Docs: ${docs}` : '';
+          return `• ${p.brand} ${p.model}${version}${verified} [${cat}]${price}${flagStr}${power}${dims}${dna}${docsStr}`;
         }).join('\n');
-        tpcCatalogBlock = `\n\nTPC PEDAL CATALOG (community-curated database — use this for accurate specs and pricing):\n${lines}`;
+        tpcCatalogBlock = `\n\nTPC PEDAL CATALOG (verified entries are TPC admin-confirmed; use manual URLs with fetch_url when a user asks about MIDI, specs, or setup for a specific pedal):\n${lines}`;
       }
 
       // 3. Community signals — minimum threshold before surfacing any signal
