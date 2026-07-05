@@ -372,8 +372,8 @@ serve(async (req) => {
     }
 
     if (existing) {
-      // Only update image if we found a better one (or the existing has none)
-      const shouldUpdateImage = !existing.image_url && image_url;
+      // Never overwrite a verified pedal's image — it has been manually curated
+      const shouldUpdateImage = !existing.is_verified && !existing.image_url && image_url;
       if (shouldUpdateImage) {
         const { data: updated } = await supabase
           .from('pedals')
