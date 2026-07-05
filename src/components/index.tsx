@@ -266,6 +266,13 @@ function PedalCardInner({ userPedal, retired = false, marketValue, imageUrlOverr
               <Text style={styles.analogBadgeText}>ANALOG</Text>
             </View>
           )}
+          {pedal.is_verified && (
+            <Image
+              source={require('../../assets/tpc-square.png')}
+              style={{ width: 14, height: 14 }}
+              contentFit="contain"
+            />
+          )}
           {retired && userPedal.retired_date && (
             <Text style={styles.retiredDate}>
               Retired {new Date(userPedal.retired_date).getFullYear()}

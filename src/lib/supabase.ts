@@ -165,6 +165,37 @@ export type Pedal = {
   image_source: 'manufacturer' | 'preferred_seller' | 'reverb_listing' | 'user_contributed' | null;
   /** Path in the 'pedal-images' Supabase Storage bucket (permanent copy) */
   image_storage_path: string | null;
+  /** Hardware revision, firmware version, or other "which variant" label (e.g. "MKII") */
+  version_label: string | null;
+  manual_url: string | null;
+  /** Path in the 'pedal-manuals' Supabase Storage bucket (permanent copy) */
+  manual_storage_path: string | null;
+  is_verified: boolean;
+  merged_into: string | null;
+  tone_dna: string | null;
+  midi_manual_url: string | null;
+  quick_start_url: string | null;
+  dimensions: string | null;
+  weight: string | null;
+  power_requirements: string | null;
+  mono_stereo: 'mono' | 'stereo' | 'mono_in_stereo_out' | null;
+  midi: boolean | null;
+  midi_notes: string | null;
+  presets: boolean | null;
+  preset_count: number | null;
+  price_usd: number | null;
+  release_year: number | null;
+  manufacturer_sku: string | null;
+  product_url: string | null;
+};
+
+export type PedalPhoto = {
+  id: string;
+  pedal_id: string;
+  url: string;
+  storage_path: string | null;
+  position: number;
+  created_at: string;
 };
 
 export type PedalColorway = {
