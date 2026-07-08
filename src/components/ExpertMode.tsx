@@ -500,11 +500,23 @@ export function ExpertMode({ onBack }: Props) {
         ticket?: string;
       }>('custom-shop-gate', {});
 
-      if (gateErr || !gateData?.allowed || !gateData.ticket) {
+      if (gateErr) {
+        // Gate infrastructure error (network, server 500, ticket RPC failure).
+        // Pro users should never be blocked by backend infra issues — tpc-advisor
+        // has its own server-side is_premium check as a backstop.
+        // Free users still get blocked: without a ticket, tpc-advisor rejects them.
+        if (!storeProfile?.is_premium) {
+          openPaywall('custom_shop');
+          return;
+        }
+        // Pro user: proceed without a ticket; tpc-advisor will verify is_premium.
+      } else if (!gateData?.allowed) {
+        // Deliberate gate denial (free limit reached, unauthorized).
         openPaywall('custom_shop');
         return;
+      } else {
+        runTicketRef.current = gateData.ticket ?? null;
       }
-      runTicketRef.current = gateData.ticket;
     }
 
     setStage('analyzing');
@@ -691,18 +703,21 @@ ${interviewSummary}
 ${signal ? `${signal}\n` : ''}${exclusionBlock}${rejectionBlock}Find the ideal next pedal for this player.`;
 
     try {
-      const { data } = await invokeEdgeFunction<{ content?: { type: string; text: string }[] }>('tpc-advisor', {
+      const { data, error: fnErr } = await invokeEdgeFunction<{ content?: { type: string; text: string }[] }>('tpc-advisor', {
         messages: [{ role: 'user', content: userMessage }],
         systemPrompt,
         stream: false,
         maxTokens: 3000,
-        model: 'claude-sonnet-4-20250514', // Custom Shop final pick — premium quality
-        enableWebSearch: true,             // Lets Claude verify pricing + availability
+        model: 'claude-sonnet-4-5',
+        enableWebSearch: true,
         purpose: 'custom_shop',
         ticket: runTicketRef.current ?? undefined,
       });
 
+      if (fnErr) throw new Error(`edge fn: ${JSON.stringify(fnErr)}`);
+
       const raw = data?.content?.find(c => c.type === 'text')?.text ?? '';
+      if (!raw) throw new Error('empty response from tpc-advisor');
       const clean = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       const parsed = JSON.parse(clean) as Recommendation;
       setRecommendation(parsed);
