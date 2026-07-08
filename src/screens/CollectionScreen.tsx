@@ -595,6 +595,28 @@ export default function CollectionScreen() {
     await _doShareCollectionCard(collectionPage, currentPagePedals);
   }, [collectionPage, currentPagePedals, _doShareCollectionCard]);
 
+  const handleShareAllPages = useCallback(async () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setSavingAllPages(true);
+    setShareConfigOpen(false);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      for (let i = 0; i < collectionPages.length; i++) {
+        const viewNode = pageRefs.current[i];
+        if (!viewNode) continue;
+        const uri = await captureRef({ current: viewNode }, { format: 'png', quality: 1, result: 'tmpfile' });
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(uri, { mimeType: 'image/png', UTI: 'public.png' });
+        }
+        FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+      }
+    } catch {
+      Alert.alert('Something went wrong', 'Could not share images. Try again.');
+    } finally {
+      setSavingAllPages(false);
+    }
+  }, [collectionPages]);
+
   // Save every page as an image to the camera roll
   const handleSaveAllPages = useCallback(async () => {
     const { status } = await MediaLibrary.requestPermissionsAsync();
@@ -1095,6 +1117,53 @@ export default function CollectionScreen() {
     photoPickRef.current = { pedalId: detailPedal.id, userId: session.user.id, useCamera };
     setShowDetailModal(false);
     setTimeout(() => doPickPhotoFromMain(), 400);
+  };
+
+  const handleOpenPhotoOptions = () => {
+    if (!detailPedal) return;
+    const hasUserPhoto = !!detailPedal.user_image_path;
+    const options: { text: string; style?: 'default' | 'destructive' | 'cancel'; onPress?: () => void }[] = [
+      { text: 'Take Photo', onPress: () => setTimeout(() => handlePickPhoto(true), 400) },
+      { text: 'Photo Library', onPress: () => setTimeout(() => handlePickPhoto(false), 400) },
+    ];
+    if (hasUserPhoto) {
+      options.push({
+        text: 'Remove Photo',
+        style: 'destructive',
+        onPress: () => handleRemovePhoto(),
+      });
+    }
+    options.push({ text: 'Cancel', style: 'cancel' });
+    Alert.alert('Pedal Photo', undefined, options);
+  };
+
+  const handleRemovePhoto = async () => {
+    if (!detailPedal?.user_image_path) return;
+    const pedalId = detailPedal.id;
+    const oldPath = detailPedal.user_image_path;
+    try {
+      await supabase.from('user_pedals').update({ user_image_path: null }).eq('id', pedalId);
+      // Best-effort delete of stored files
+      const thumbPath = oldPath.replace(/\.jpg$/, '_sm.jpg');
+      supabase.storage.from('user-pedal-photos').remove([oldPath, thumbPath]).catch(() => {});
+      useStore.setState(s => {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { [pedalId]: _u, ...restUrls } = s.userImageUrls;
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { [pedalId]: _t, ...restThumbs } = s.userImageThumbUrls;
+        return {
+          userImageUrls: restUrls,
+          userImageThumbUrls: restThumbs,
+          ownedPedals: s.ownedPedals.map(p => p.id === pedalId ? { ...p, user_image_path: null } : p),
+          wishlistPedals: s.wishlistPedals.map(p => p.id === pedalId ? { ...p, user_image_path: null } : p),
+          retiredPedals: s.retiredPedals.map(p => p.id === pedalId ? { ...p, user_image_path: null } : p),
+        };
+      });
+      setDetailUserImageUrl(null);
+      setDetailImageFailed(false);
+    } catch {
+      Alert.alert('Could not remove photo', 'Please try again.');
+    }
   };
 
   const doPickPhotoFromMain = useCallback(async () => {
@@ -2082,24 +2151,30 @@ export default function CollectionScreen() {
                       })()}
 
                       <View style={styles.detailImageRow}>
-                {detailUserImageUrl && !detailImageFailed ? (
-                  <Image
-                    source={{ uri: detailUserImageUrl }}
-                    style={styles.detailImage}
-                    onError={() => setDetailImageFailed(true)}
-                  />
-                ) : detailPedal?.pedal?.image_url ? (
-                  <Image source={{ uri: detailPedal.pedal.image_url }} style={styles.detailImage} />
-                ) : (
-                  <View style={styles.detailImageFallback}>
-                    <Ionicons name="image-outline" size={22} color={colors.textMuted} />
-                    <Text style={styles.detailImageFallbackText}>No photo</Text>
-                  </View>
-                )}
+                {(() => {
+                  const colorwayImg = detailColorwayId
+                    ? detailColorways.find(cw => cw.id === detailColorwayId)?.image_url ?? null
+                    : null;
+                  const effectiveImg = (detailUserImageUrl && !detailImageFailed)
+                    ? detailUserImageUrl
+                    : colorwayImg ?? detailPedal?.pedal?.image_url ?? null;
+                  return effectiveImg ? (
+                    <Image
+                      source={{ uri: effectiveImg }}
+                      style={styles.detailImage}
+                      onError={() => { if (effectiveImg === detailUserImageUrl) setDetailImageFailed(true); }}
+                    />
+                  ) : (
+                    <View style={styles.detailImageFallback}>
+                      <Ionicons name="image-outline" size={22} color={colors.textMuted} />
+                      <Text style={styles.detailImageFallbackText}>No photo</Text>
+                    </View>
+                  );
+                })()}
                   <View style={{ flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs }}>
                     <TouchableOpacity
                       style={styles.detailPhotoBtn}
-                      onPress={() => handlePickPhoto(true)}
+                      onPress={handleOpenPhotoOptions}
                       activeOpacity={0.8}
                       disabled={uploadingPhoto}
                     >
@@ -2108,22 +2183,9 @@ export default function CollectionScreen() {
                       ) : (
                         <>
                           <Ionicons name="camera-outline" size={18} color={colors.teal} />
-                          <Text style={styles.detailPhotoBtnText}>Take Photo</Text>
-                        </>
-                      )}
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.detailPhotoBtn}
-                      onPress={() => handlePickPhoto(false)}
-                      activeOpacity={0.8}
-                      disabled={uploadingPhoto}
-                    >
-                      {uploadingPhoto ? (
-                        <ActivityIndicator color={colors.teal} />
-                      ) : (
-                        <>
-                          <Ionicons name="images-outline" size={18} color={colors.teal} />
-                          <Text style={styles.detailPhotoBtnText}>Choose Photo</Text>
+                          <Text style={styles.detailPhotoBtnText}>
+                            {detailPedal?.user_image_path ? 'Change Photo' : 'Add Photo'}
+                          </Text>
                         </>
                       )}
                     </TouchableOpacity>
@@ -3247,28 +3309,50 @@ export default function CollectionScreen() {
               </View>
             )}
 
-            {/* Save all pages to Photos — only shown when multiple pages */}
+            {/* Save / Share all pages — only shown when multiple pages */}
             {totalCollectionPages > 1 && shareFilteredPedals.length > 0 && (
-              <TouchableOpacity
-                style={styles.saveAllBtn}
-                activeOpacity={0.75}
-                onPress={handleSaveAllPages}
-                disabled={savingAllPages}
-              >
-                {savingAllPages ? (
-                  <View style={styles.saveAllBtnInner}>
-                    <ActivityIndicator size="small" color={colors.teal} />
-                    <Text style={styles.saveAllBtnText}>Saving…</Text>
-                  </View>
-                ) : (
-                  <View style={styles.saveAllBtnInner}>
-                    <Ionicons name="download-outline" size={16} color={colors.teal} />
-                    <Text style={styles.saveAllBtnText}>
-                      Save All {totalCollectionPages} Pages to Photos
-                    </Text>
-                  </View>
-                )}
-              </TouchableOpacity>
+              <View style={{ gap: spacing.xs }}>
+                <TouchableOpacity
+                  style={styles.saveAllBtn}
+                  activeOpacity={0.75}
+                  onPress={handleShareAllPages}
+                  disabled={savingAllPages}
+                >
+                  {savingAllPages ? (
+                    <View style={styles.saveAllBtnInner}>
+                      <ActivityIndicator size="small" color={colors.teal} />
+                      <Text style={styles.saveAllBtnText}>Sharing…</Text>
+                    </View>
+                  ) : (
+                    <View style={styles.saveAllBtnInner}>
+                      <Ionicons name="share-outline" size={16} color={colors.teal} />
+                      <Text style={styles.saveAllBtnText}>
+                        Share All {totalCollectionPages} Pages
+                      </Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.saveAllBtn}
+                  activeOpacity={0.75}
+                  onPress={handleSaveAllPages}
+                  disabled={savingAllPages}
+                >
+                  {savingAllPages ? (
+                    <View style={styles.saveAllBtnInner}>
+                      <ActivityIndicator size="small" color={colors.teal} />
+                      <Text style={styles.saveAllBtnText}>Saving…</Text>
+                    </View>
+                  ) : (
+                    <View style={styles.saveAllBtnInner}>
+                      <Ionicons name="download-outline" size={16} color={colors.teal} />
+                      <Text style={styles.saveAllBtnText}>
+                        Save All {totalCollectionPages} Pages to Photos
+                      </Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              </View>
             )}
           </SwipeDismissSheet>
         </View>
