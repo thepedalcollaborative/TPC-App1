@@ -31,6 +31,7 @@ import {
   PRICE_ANNUAL,
   PRICE_ANNUAL_MONTHLY,
   PRICE_ANNUAL_SAVINGS,
+  PURCHASES_ENABLED,
   fetchLivePrices,
   purchasePro,
   restorePurchases,
@@ -115,7 +116,15 @@ export default function PaywallScreen({ visible, reason, onClose }: PaywallScree
     try {
       const success = await purchasePro(plan, userId);
       if (success) {
-        await fetchProfile();
+        // Optimistically mark the user as Pro immediately — the RevenueCat
+        // entitlement is confirmed, but the webhook that writes is_premium to
+        // Supabase can lag by several seconds. Without this, fetchProfile()
+        // would return is_premium: false (stale DB) and the paywall would
+        // reappear even though the purchase succeeded.
+        useStore.setState(s => ({
+          profile: s.profile ? { ...s.profile, is_premium: true } : s.profile,
+        }));
+        fetchProfile().catch(() => {}); // sync DB in background; don't block close
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         onClose();
       }
@@ -132,7 +141,10 @@ export default function PaywallScreen({ visible, reason, onClose }: PaywallScree
     try {
       const restored = await restorePurchases(userId);
       if (restored) {
-        await fetchProfile();
+        useStore.setState(s => ({
+          profile: s.profile ? { ...s.profile, is_premium: true } : s.profile,
+        }));
+        fetchProfile().catch(() => {});
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         onClose();
       } else {
@@ -186,7 +198,27 @@ export default function PaywallScreen({ visible, reason, onClose }: PaywallScree
             ))}
           </View>
 
+          {/* ── Coming soon (purchases disabled) ── */}
+          {!PURCHASES_ENABLED && (
+            <>
+              <View style={styles.comingSoonCard}>
+                <Ionicons name="time-outline" size={20} color={colors.gold} />
+                <Text style={styles.comingSoonTitle}>TPC Pro is almost here</Text>
+                <Text style={styles.comingSoonSub}>
+                  Subscriptions launch soon. Everything above will be unlockable
+                  right here — keep building your vault in the meantime.
+                </Text>
+              </View>
+              <TouchableOpacity onPress={onClose} style={styles.ctaWrap} activeOpacity={0.88}>
+                <LinearGradient colors={gradients.teal} style={styles.cta}>
+                  <Text style={styles.ctaText}>Back to my vault</Text>
+                </LinearGradient>
+              </TouchableOpacity>
+            </>
+          )}
+
           {/* ── Plan toggle ── */}
+          {PURCHASES_ENABLED && (
           <View style={styles.planToggle}>
             <TouchableOpacity
               style={[styles.planBtn, plan === 'monthly' && styles.planBtnActive]}
@@ -220,8 +252,11 @@ export default function PaywallScreen({ visible, reason, onClose }: PaywallScree
               </Text>
             </TouchableOpacity>
           </View>
+          )}
 
           {/* ── CTA ── */}
+          {PURCHASES_ENABLED && (
+          <>
           <TouchableOpacity
             onPress={handlePurchase}
             disabled={loading}
@@ -255,6 +290,8 @@ export default function PaywallScreen({ visible, reason, onClose }: PaywallScree
           <TouchableOpacity onPress={onClose} style={styles.laterBtn}>
             <Text style={styles.laterText}>Maybe later</Text>
           </TouchableOpacity>
+          </>
+          )}
         </ScrollView>
       </View>
     </Modal>
@@ -347,6 +384,30 @@ const styles = StyleSheet.create({
     fontFamily: typography.bodyMedium,
     color: 'rgba(255,255,255,0.85)',
     flex: 1,
+  },
+  // Coming soon
+  comingSoonCard: {
+    width: '100%',
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
+    borderColor: 'rgba(229,192,74,0.35)',
+    padding: spacing.lg,
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginBottom: spacing.xl,
+  },
+  comingSoonTitle: {
+    fontSize: typography.sizes.md,
+    fontFamily: typography.display,
+    color: '#FFFFFF',
+  },
+  comingSoonSub: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.body,
+    color: 'rgba(255,255,255,0.6)',
+    textAlign: 'center',
+    lineHeight: 20,
   },
   // Plan toggle
   planToggle: {

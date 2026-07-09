@@ -25,7 +25,6 @@ import { enableScreens } from 'react-native-screens';
 import { isAffectedIOSVersion } from './src/lib/iosVersion';
 import { supabase } from './src/lib/supabase';
 import { useStore } from './src/hooks/useStore';
-import { configureRevenueCat, syncEntitlement, hasBetaFullAccess } from './src/lib/subscription';
 import {
   requestNotificationPermissions,
   scheduleWeeklyPickNotification,
@@ -493,21 +492,15 @@ export default function App() {
     SplashScreen.hideAsync().catch(() => {});
   }, []);
 
-  // Load profile and configure RevenueCat whenever a user signs in.
-  // Order matters: is_premium from the DB is the source of truth — Patreon,
-  // manual grants, and RC webhook all write there. Awaiting fetchProfile first
-  // means the Pro gate is resolved before any screen renders, so Patreon/manual
-  // Pro users never see the paywall flash.
-  // RevenueCat is always configured regardless of is_premium — the SDK init is
-  // harmless for Pro users, and skipping it causes Restore to throw for any
-  // user who reaches the paywall (e.g. during a race or bug).
+  // Load profile whenever a user signs in. is_premium from the DB is the
+  // source of truth — Patreon, manual grants, and (future) purchase webhooks
+  // all write there. Awaiting fetchProfile first means the Pro gate is
+  // resolved before any screen renders, so Pro users never see a paywall flash.
   useEffect(() => {
     if (!session?.user?.id) return;
     const userId = session.user.id;
     (async () => {
       await fetchProfile();
-      configureRevenueCat(userId);
-      syncEntitlement().catch(() => {});
       // Notification native module calls UIKit void methods via TurboModule on
       // background threads — skip entirely on iOS 26.0–26.5.
       if (AFFECTED_IOS) return;

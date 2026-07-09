@@ -2412,7 +2412,7 @@ export default function CollectionScreen() {
                   onPress={() => setDetailColorwayId(null)}
                 >
                   {detailPedal?.pedal?.image_url ? (
-                    <Image source={{ uri: detailPedal.pedal.image_url }} style={styles.colorwaySwatch} contentFit="cover" />
+                    <Image source={{ uri: detailPedal.pedal.image_url }} style={styles.colorwaySwatch} resizeMode="cover" />
                   ) : null}
                   <Text style={[styles.colorwayChipText, detailColorwayId === null && styles.colorwayChipTextSelected]}>
                     Standard
@@ -4123,7 +4123,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
                         activeOpacity={0.7}
                       >
                         {selectedPedal?.image_url ? (
-                          <Image source={{ uri: selectedPedal.image_url }} style={styles.colorwaySwatch} contentFit="cover" />
+                          <Image source={{ uri: selectedPedal.image_url }} style={styles.colorwaySwatch} resizeMode="cover" />
                         ) : null}
                         <Text style={[styles.colorwayChipText, selectedColorwayId === null && styles.colorwayChipTextSelected]}>
                           Standard
@@ -4456,7 +4456,7 @@ function AddPedalModal({ visible, onClose, onAdded, session, defaultTab, initial
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
                         <Text style={styles.resultBrand}>{pedal.brand}</Text>
                         {pedal.is_verified && (
-                          <Image source={require('../../assets/tpc-square.png')} style={{ width: 13, height: 13 }} contentFit="contain" />
+                          <Image source={require('../../assets/tpc-square.png')} style={{ width: 13, height: 13 }} resizeMode="contain" />
                         )}
                       </View>
                       <Text style={styles.resultModel}>{pedal.model}</Text>

@@ -20,6 +20,11 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ─── RevenueCat stubs ─────────────────────────────────────────────────────────
 
+/** Purchases are disabled until the RevenueCat SDK returns (iOS 26 crash).
+ *  PaywallScreen renders a "coming soon" variant instead of purchase buttons
+ *  so App Review never sees a broken purchase flow. */
+export const PURCHASES_ENABLED = false;
+
 export function hasBetaFullAccess(): boolean { return false; }
 export function isRevenueCatConfigured(): boolean { return false; }
 export function configureRevenueCat(_userId?: string): void { /* no-op */ }
