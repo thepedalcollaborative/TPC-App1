@@ -71,8 +71,13 @@ if (AFFECTED_IOS) {
   try { enableScreens(false); } catch { /* no-op */ }
 }
 
-// Defensive wrapper — prevents crash if native module isn't linked in Expo Go
-try { SplashScreen.preventAutoHideAsync(); } catch { /* no-op */ }
+// On iOS 26.0–26.5, preventAutoHideAsync() is a void TurboModule call that
+// dispatches on a background GCD thread and crashes via ObjC exception.
+// Skip it on affected versions — the splash auto-hides immediately, which is
+// acceptable given the app was otherwise unlaunchable on those versions.
+if (!AFFECTED_IOS) {
+  try { SplashScreen.preventAutoHideAsync(); } catch { /* no-op */ }
+}
 
 const Tab = createBottomTabNavigator();
 
@@ -243,9 +248,9 @@ function BoardsStackNavigator() {
 function AIStackNavigator() {
   return (
     <AIStack.Navigator screenOptions={{ headerShown: false, gestureEnabled: !AFFECTED_IOS }}>
-      <AIStack.Screen name="Advisor" component={AdvisorScreen} />
-      <AIStack.Screen name="Finder"  component={FinderScreen} />
-      <AIStack.Screen name="AIHub"   component={AIHubScreen} />
+      <AIStack.Screen name="AIHub"      component={AIHubScreen} />
+      <AIStack.Screen name="Advisor"    component={AdvisorScreen} />
+      <AIStack.Screen name="Finder"     component={FinderScreen} />
     </AIStack.Navigator>
   );
 }
@@ -479,27 +484,38 @@ export default function App() {
   // Hide the native splash immediately on first mount so only our
   // AnimatedSplash is visible — avoids a flash of the native splash icon
   // before the JS animation kicks in.
+  // On iOS 26.0–26.5, hideAsync() is the same void TurboModule call as
+  // preventAutoHideAsync() (guarded above) — it aborts the process via ObjC
+  // exception on a background GCD thread. Skip it: preventAutoHideAsync was
+  // never called on affected versions, so the splash auto-hides on its own.
   useEffect(() => {
+    if (AFFECTED_IOS) return;
     SplashScreen.hideAsync().catch(() => {});
   }, []);
 
-  // Configure RevenueCat and sync Pro entitlement whenever user signs in
+  // Load profile and configure RevenueCat whenever a user signs in.
+  // Order matters: is_premium from the DB is the source of truth — Patreon,
+  // manual grants, and RC webhook all write there. Awaiting fetchProfile first
+  // means the Pro gate is resolved before any screen renders, so Patreon/manual
+  // Pro users never see the paywall flash.
+  // RevenueCat is always configured regardless of is_premium — the SDK init is
+  // harmless for Pro users, and skipping it causes Restore to throw for any
+  // user who reaches the paywall (e.g. during a race or bug).
   useEffect(() => {
     if (!session?.user?.id) return;
     const userId = session.user.id;
-    configureRevenueCat(userId);
-    // Client sync reads RevenueCat state only. Premium writes happen through
-    // trusted server-side paths such as RevenueCat webhooks and Patreon connect.
-    syncEntitlement().catch(() => {});
-    fetchProfile();
-    // Notification native module calls UIKit void methods via TurboModule on
-    // background threads — skip entirely on iOS 26.0–26.5.
-    if (AFFECTED_IOS) return;
-    requestNotificationPermissions().then(granted => {
+    (async () => {
+      await fetchProfile();
+      configureRevenueCat(userId);
+      syncEntitlement().catch(() => {});
+      // Notification native module calls UIKit void methods via TurboModule on
+      // background threads — skip entirely on iOS 26.0–26.5.
+      if (AFFECTED_IOS) return;
+      const granted = await requestNotificationPermissions();
       if (!granted) return;
       scheduleWeeklyPickNotification().catch(() => {});
       savePushToken(userId).catch(() => {});
-    });
+    })();
   }, [session?.user?.id]);
 
   // Keep the weekly vault digest content in sync with live collection/value.
@@ -618,7 +634,10 @@ export default function App() {
   // as a fallback so the app opens on affected devices.
   const appInner = (
     <>
-      <StatusBar style="light" />
+      {/* StatusBar drives RCTStatusBarManager.setStyle — a UIKit void method
+          with the same iOS 26.0–26.5 TurboModule abort. Skip on affected
+          versions; the bar renders with default styling there. */}
+      {!AFFECTED_IOS && <StatusBar style="light" />}
       <View style={styles.appRoot}>
         {baseContent}
 
