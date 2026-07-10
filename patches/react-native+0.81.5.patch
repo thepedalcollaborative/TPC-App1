@@ -1,0 +1,31 @@
+diff --git a/node_modules/react-native/.DS_Store b/node_modules/react-native/.DS_Store
+new file mode 100644
+index 0000000..e9251b4
+Binary files /dev/null and b/node_modules/react-native/.DS_Store differ
+diff --git a/node_modules/react-native/ReactCommon/react/nativemodule/core/platform/ios/ReactCommon/RCTTurboModule.mm b/node_modules/react-native/ReactCommon/react/nativemodule/core/platform/ios/ReactCommon/RCTTurboModule.mm
+index 2a67797..4b976fc 100644
+--- a/node_modules/react-native/ReactCommon/react/nativemodule/core/platform/ios/ReactCommon/RCTTurboModule.mm
++++ b/node_modules/react-native/ReactCommon/react/nativemodule/core/platform/ios/ReactCommon/RCTTurboModule.mm
+@@ -435,7 +435,21 @@ TraceSection s(
+     @try {
+       [inv invokeWithTarget:strongModule];
+     } @catch (NSException *exception) {
+-      throw convertNSExceptionToJSError(runtime, exception, std::string{moduleName}, methodNameStr);
++      if (shouldVoidMethodsExecuteSync_) {
++        // Sync invocations run inside the JS call stack — safe to surface as a JS error.
++        throw convertNSExceptionToJSError(runtime, exception, std::string{moduleName}, methodNameStr);
++      } else {
++        // TPC patch (facebook/react-native#54859): async void methods run on GCD
++        // worker threads with no C++ exception handler. Rethrowing here calls
++        // std::terminate → abort (iOS 26 startup crash), and touches the JSI
++        // runtime off the JS thread. Log and survive instead.
++        NSLog(
++            @"[TPC][TurboModule] Swallowed NSException from async void %s.%s: %@ — %@",
++            moduleName,
++            methodNameStr.c_str(),
++            exception.name,
++            exception.reason);
++      }
+     } @finally {
+       [retainedObjectsForInvocation removeAllObjects];
+     }
