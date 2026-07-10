@@ -11,8 +11,6 @@ import {
   Animated,
   Image,
   Linking,
-  Modal,
-  ActivityIndicator,
   Alert,
   ActionSheetIOS,
 } from 'react-native';
@@ -39,11 +37,9 @@ import {
   type ConversationMessage,
 } from '../lib/supabase';
 import { shareAdvisorResponse } from '../lib/share';
-import { weeklyPickCountdownLabel } from '../lib/notifications';
 import { useRoute, RouteProp } from '@react-navigation/native';
 import { AIStackParamList, RootStackParamList } from '../types/navigation';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { SwipeDismissSheet } from '../components/SwipeDismissSheet';
 import { classifyError } from '../lib/networkError';
 import * as Clipboard from 'expo-clipboard';
 
@@ -68,7 +64,7 @@ export default function AdvisorScreen() {
   const route = useRoute<RouteProp<AIStackParamList, 'Advisor'>>();
   const resumeConversationId = route.params?.conversationId;
 
-  const { session, ownedPedals, wishlistPedals, retiredPedals, boards, profile, openPaywall, weeklyPick, weeklyPickLoading, fetchWeeklyPick, addToWishlist } = useStore();
+  const { session, ownedPedals, wishlistPedals, retiredPedals, boards, profile, openPaywall } = useStore();
 
   const isPro = Boolean(profile?.is_premium) || hasBetaFullAccess();
   const { gateState, applyQuota } = useMessageGate();
@@ -78,8 +74,6 @@ export default function AdvisorScreen() {
   const [sessionWarning, setSessionWarning] = useState<string | null>(null);
   const [memory, setMemory] = useState('');
   const [queuedCount, setQueuedCount] = useState(0);
-  const [showWeeklyDetail, setShowWeeklyDetail] = useState(false);
-  const [weeklyWishlistState, setWeeklyWishlistState] = useState<'idle' | 'loading' | 'added' | 'exists'>('idle');
   const [pendingImage, setPendingImage] = useState<{ uri: string; base64: string } | null>(null);
 
   // ── Conversation persistence (Pro only) ────────────────────────────────────
@@ -141,12 +135,6 @@ export default function AdvisorScreen() {
       memoryRef.current = m;
     });
   }, [session?.user?.id]);
-
-  // Fetch weekly pick when screen mounts (gated inside fetchWeeklyPick for Pro)
-  useEffect(() => {
-    fetchWeeklyPick();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPro]);
 
   // Fetch community signals on mount (non-blocking, cached for session)
   useEffect(() => {
@@ -433,6 +421,13 @@ export default function AdvisorScreen() {
         style={[styles.header, { paddingTop: insets.top + 12 }]}
       >
         <View style={styles.headerInner}>
+          <TouchableOpacity
+            onPress={() => navigation.goBack()}
+            hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+            style={styles.headerBackBtn}
+          >
+            <Ionicons name="chevron-back" size={24} color={colors.textPrimary} />
+          </TouchableOpacity>
           <View style={styles.advisorIcon}>
             <LinearGradient colors={TEAL_GRADIENT} style={styles.advisorIconGradient}>
               <Ionicons name="sparkles" size={22} color="#fff" />
@@ -526,12 +521,6 @@ export default function AdvisorScreen() {
           <EmptyState
             ownedCount={ownedPedals.length}
             onPromptPress={handleStarterPrompt}
-            isPro={isPro}
-            weeklyPick={weeklyPick}
-            weeklyPickLoading={weeklyPickLoading}
-            onWeeklyPickTap={() => { setWeeklyWishlistState('idle'); setShowWeeklyDetail(true); }}
-            onCustomShopTap={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); (navigation as any).navigate('Finder'); }}
-            onOpenPaywall={() => openPaywall('weekly_pick')}
           />
         ) : (
           <>
@@ -629,92 +618,6 @@ export default function AdvisorScreen() {
       </View>
     </KeyboardAvoidingView>
 
-    {/* ── Weekly Pick detail sheet ── */}
-    {weeklyPick && (
-      <Modal
-        visible={showWeeklyDetail}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowWeeklyDetail(false)}
-      >
-        <View style={styles.detailOverlay}>
-          <TouchableOpacity style={styles.detailBackdrop} activeOpacity={1} onPress={() => setShowWeeklyDetail(false)} />
-          <SwipeDismissSheet style={[styles.detailSheet, { paddingBottom: insets.bottom + 24 }]} onDismiss={() => setShowWeeklyDetail(false)}>
-            <View style={styles.detailHeader}>
-              <View style={styles.detailTitleRow}>
-                <Ionicons name="sparkles" size={15} color={colors.gold} />
-                <Text style={styles.detailTitle}>This Week's Pick</Text>
-              </View>
-              <TouchableOpacity onPress={() => setShowWeeklyDetail(false)} hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}>
-                <Ionicons name="close" size={20} color={colors.textMuted} />
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.detailPedal}>{weeklyPick.brand} {weeklyPick.model}</Text>
-            {weeklyPick.category && (
-              <Text style={styles.detailCategory}>{weeklyPick.category}</Text>
-            )}
-            <Text style={styles.detailCountdown}>{weeklyPickCountdownLabel()}</Text>
-            <Text style={styles.detailWhyLabel}>Why this pedal?</Text>
-            <Text style={styles.detailWhy}>{weeklyPick.why}</Text>
-            <View style={styles.detailActions}>
-              <TouchableOpacity
-                style={styles.detailBtnReverb}
-                activeOpacity={0.8}
-                onPress={() => Linking.openURL(reverbSearchUrl(`${weeklyPick.brand} ${weeklyPick.model}`))}
-              >
-                <Ionicons name="storefront-outline" size={16} color="#fff" />
-                <Text style={styles.detailBtnReverbText}>See on Reverb</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.detailBtnWishlist, weeklyWishlistState !== 'idle' && styles.detailBtnWishlistDone]}
-                activeOpacity={0.8}
-                disabled={weeklyWishlistState !== 'idle'}
-                onPress={async () => {
-                  setWeeklyWishlistState('loading');
-                  const result = await addToWishlist(weeklyPick.brand, weeklyPick.model, {
-                    category: weeklyPick.category ?? 'other',
-                    subcategory: 'Weekly Pick',
-                    description: weeklyPick.why ?? '',
-                    analog: false,
-                    price: null,
-                  });
-                  if (result === 'added') {
-                    setWeeklyWishlistState('added');
-                  } else if (result === 'exists') {
-                    setWeeklyWishlistState('exists');
-                  } else if (result === 'not_found') {
-                    setWeeklyWishlistState('idle');
-                    Alert.alert('Not in catalog yet', 'Could not add this pick right now. Please try again in a moment.');
-                  } else {
-                    setWeeklyWishlistState('idle');
-                    Alert.alert('Could not add', 'Please try again in a moment.');
-                  }
-                }}
-              >
-                {weeklyWishlistState === 'loading' ? (
-                  <ActivityIndicator size="small" color={colors.teal} />
-                ) : weeklyWishlistState === 'added' ? (
-                  <>
-                    <Ionicons name="checkmark-circle" size={16} color={colors.teal} />
-                    <Text style={styles.detailBtnWishlistText}>Added to Wishlist</Text>
-                  </>
-                ) : weeklyWishlistState === 'exists' ? (
-                  <>
-                    <Ionicons name="checkmark-circle" size={16} color={colors.textMuted} />
-                    <Text style={[styles.detailBtnWishlistText, { color: colors.textMuted }]}>Already on Wishlist</Text>
-                  </>
-                ) : (
-                  <>
-                    <Ionicons name="bookmark-outline" size={16} color={colors.teal} />
-                    <Text style={styles.detailBtnWishlistText}>Add to Wishlist</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            </View>
-          </SwipeDismissSheet>
-        </View>
-      </Modal>
-    )}
     </>
   );
 }
@@ -934,23 +837,10 @@ function TypingDots({
 function EmptyState({
   ownedCount,
   onPromptPress,
-  isPro,
-  weeklyPick,
-  weeklyPickLoading,
-  onWeeklyPickTap,
-  onCustomShopTap,
-  onOpenPaywall,
 }: {
   ownedCount: number;
   onPromptPress: (p: string) => void;
-  isPro: boolean;
-  weeklyPick: { brand: string; model: string; why: string; category: string | null; weekKey: string } | null;
-  weeklyPickLoading: boolean;
-  onWeeklyPickTap: () => void;
-  onCustomShopTap: () => void;
-  onOpenPaywall: () => void;
 }) {
-  // Shuffle once on mount — useMemo prevents reshuffling on every re-render
   const prompts = useMemo(
     () => [...STARTER_PROMPTS].sort(() => Math.random() - 0.5).slice(0, 6),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -959,94 +849,6 @@ function EmptyState({
 
   return (
     <View style={styles.emptyState}>
-      {/* Shortcut cards — Weekly Pick + Custom Shop */}
-      <View style={styles.shortcutRow}>
-        {/* Weekly Pick */}
-        <TouchableOpacity
-          style={styles.shortcutCard}
-          activeOpacity={0.88}
-          onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); isPro ? onWeeklyPickTap() : onOpenPaywall(); }}
-        >
-          <LinearGradient
-            colors={isPro && weeklyPick ? [colors.gold, colors.goldDark] : ['#2C1F08', '#1A1200']}
-            style={styles.shortcutCardInner}
-          >
-            {/* Top: badge */}
-            <View style={styles.shortcutBadgeRow}>
-              <View style={styles.shortcutBadge}>
-                <Text style={styles.shortcutBadgeText}>✦ WEEKLY PICK</Text>
-              </View>
-              {!isPro && (
-                <View style={styles.shortcutLockChip}>
-                  <Ionicons name="lock-closed" size={8} color={colors.gold} />
-                  <Text style={styles.shortcutLockChipText}>PRO</Text>
-                </View>
-              )}
-            </View>
-
-            {/* Middle: content */}
-            <View style={styles.shortcutContent}>
-              {!isPro ? (
-                <>
-                  <View style={[styles.shortcutIconCircle, styles.shortcutIconCircleGold]}>
-                    <Ionicons name="sparkles" size={18} color={colors.gold} />
-                  </View>
-                  <Text style={styles.shortcutLockedTitle}>Your pick{'\n'}is ready</Text>
-                </>
-              ) : weeklyPickLoading && !weeklyPick ? (
-                <>
-                  <View style={[styles.shortcutIconCircle, styles.shortcutIconCircleWhite]}>
-                    <ActivityIndicator size="small" color="rgba(255,255,255,0.8)" />
-                  </View>
-                  <Text style={styles.shortcutLoadingText}>Finding{'\n'}this week's…</Text>
-                </>
-              ) : weeklyPick ? (
-                <>
-                  <Text style={styles.shortcutPickBrand} numberOfLines={1}>{weeklyPick.brand}</Text>
-                  <Text style={styles.shortcutPickModel} numberOfLines={2}>{weeklyPick.model}</Text>
-                </>
-              ) : null}
-            </View>
-
-            {/* Bottom: CTA */}
-            <View style={styles.shortcutCtaRow}>
-              <Text style={styles.shortcutCta}>{isPro && weeklyPick ? 'Open' : isPro ? 'View' : 'Unlock Pro'}</Text>
-              <Ionicons name="arrow-forward" size={11} color="rgba(255,255,255,0.7)" />
-            </View>
-          </LinearGradient>
-        </TouchableOpacity>
-
-        {/* Custom Shop */}
-        <TouchableOpacity
-          style={styles.shortcutCard}
-          activeOpacity={0.88}
-          onPress={onCustomShopTap}
-        >
-          <LinearGradient colors={[colors.teal, colors.tealDark]} style={styles.shortcutCardInner}>
-            {/* Top: badge */}
-            <View style={styles.shortcutBadgeRow}>
-              <View style={styles.shortcutBadge}>
-                <Text style={styles.shortcutBadgeText}>✦ CUSTOM SHOP</Text>
-              </View>
-            </View>
-
-            {/* Middle: content */}
-            <View style={styles.shortcutContent}>
-              <View style={[styles.shortcutIconCircle, styles.shortcutIconCircleWhite]}>
-                <Ionicons name="flame" size={18} color="#fff" />
-              </View>
-              <Text style={styles.shortcutShopTitle}>Feed Your{'\n'}GAS</Text>
-            </View>
-
-            {/* Bottom: CTA */}
-            <View style={styles.shortcutCtaRow}>
-              <Text style={styles.shortcutCta}>Get my pick</Text>
-              <Ionicons name="arrow-forward" size={11} color="rgba(255,255,255,0.7)" />
-            </View>
-          </LinearGradient>
-        </TouchableOpacity>
-      </View>
-
       {/* Hero */}
       <LinearGradient colors={['#3D5261', '#2A3E4E']} style={styles.emptyHero}>
         <View style={styles.emptyIconRing}>
@@ -1139,6 +941,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
+  },
+  headerBackBtn: {
+    marginRight: spacing.xs,
   },
   headerActions: {
     marginLeft: 'auto',
@@ -1528,237 +1333,4 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
   },
 
-  // ─── Shortcut cards ──────────────────────────────────────────────────────────
-  shortcutRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-  },
-  shortcutCard: {
-    flex: 1,
-  },
-  shortcutCardInner: {
-    flex: 1,
-    borderRadius: radius.xl,
-    padding: spacing.md,
-    minHeight: 144,
-    justifyContent: 'space-between',
-  },
-  shortcutBadgeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-  },
-  shortcutBadge: {
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: radius.full,
-  },
-  shortcutBadgeText: {
-    fontSize: 8,
-    fontFamily: typography.bodySemiBold,
-    color: 'rgba(255,255,255,0.85)',
-    letterSpacing: 0.8,
-  },
-  shortcutLockChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    backgroundColor: colors.gold + '22',
-    borderWidth: 1,
-    borderColor: colors.gold + '55',
-    paddingHorizontal: 5,
-    paddingVertical: 2,
-    borderRadius: radius.full,
-  },
-  shortcutLockChipText: {
-    fontSize: 8,
-    fontFamily: typography.bodySemiBold,
-    color: colors.gold,
-    letterSpacing: 0.5,
-  },
-  shortcutContent: {
-    flex: 1,
-    justifyContent: 'center',
-    paddingVertical: spacing.sm,
-    gap: 5,
-  },
-  shortcutIconCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 4,
-  },
-  shortcutIconCircleGold: {
-    backgroundColor: 'rgba(201,168,48,0.2)',
-    borderWidth: 1,
-    borderColor: 'rgba(201,168,48,0.3)',
-  },
-  shortcutIconCircleWhite: {
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
-  },
-  shortcutLockedTitle: {
-    fontSize: typography.sizes.sm,
-    fontFamily: typography.display,
-    color: colors.gold,
-    lineHeight: 18,
-  },
-  shortcutLoadingText: {
-    fontSize: typography.sizes.sm,
-    fontFamily: typography.display,
-    color: 'rgba(255,255,255,0.7)',
-    lineHeight: 18,
-  },
-  shortcutPickBrand: {
-    fontSize: typography.sizes.xs,
-    fontFamily: typography.bodyMedium,
-    color: 'rgba(255,255,255,0.6)',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  shortcutPickModel: {
-    fontSize: typography.sizes.base,
-    fontFamily: typography.display,
-    color: '#fff',
-    lineHeight: 20,
-  },
-  shortcutShopTitle: {
-    fontSize: typography.sizes.sm,
-    fontFamily: typography.display,
-    color: '#fff',
-    lineHeight: 18,
-  },
-  shortcutCtaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingTop: spacing.xs,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.12)',
-  },
-  shortcutCta: {
-    fontSize: typography.sizes.xs,
-    fontFamily: typography.bodySemiBold,
-    color: 'rgba(255,255,255,0.75)',
-  },
-
-  // ─── Weekly Pick detail modal ─────────────────────────────────────────────────
-  detailOverlay: {
-    flex: 1,
-    justifyContent: 'flex-end',
-  },
-  detailBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-  },
-  detailSheet: {
-    backgroundColor: colors.surface,
-    borderTopLeftRadius: radius.xl,
-    borderTopRightRadius: radius.xl,
-    paddingHorizontal: spacing.xl,
-    paddingTop: spacing.md,
-    gap: spacing.sm,
-  },
-  detailHandle: {
-    width: 36,
-    height: 4,
-    backgroundColor: colors.border,
-    borderRadius: radius.full,
-    alignSelf: 'center',
-    marginBottom: spacing.xs,
-  },
-  detailHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  detailTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-  },
-  detailTitle: {
-    fontSize: typography.sizes.sm,
-    fontFamily: typography.bodySemiBold,
-    color: colors.gold,
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-  },
-  detailPedal: {
-    fontSize: typography.sizes.xxl,
-    fontFamily: typography.display,
-    color: colors.textPrimary,
-    lineHeight: 32,
-  },
-  detailCategory: {
-    fontSize: typography.sizes.sm,
-    fontFamily: typography.body,
-    color: colors.textMuted,
-    marginTop: -spacing.xs,
-  },
-  detailCountdown: {
-    fontSize: typography.sizes.xs,
-    fontFamily: typography.bodyMedium,
-    color: colors.gold,
-    letterSpacing: 0.3,
-  },
-  detailWhyLabel: {
-    fontSize: typography.sizes.xs,
-    fontFamily: typography.bodySemiBold,
-    color: colors.textMuted,
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-    marginTop: spacing.xs,
-  },
-  detailWhy: {
-    fontSize: typography.sizes.base,
-    fontFamily: typography.body,
-    color: colors.textSecondary,
-    lineHeight: 22,
-  },
-  detailActions: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    marginTop: spacing.sm,
-  },
-  detailBtnReverb: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs,
-    backgroundColor: '#E25B45',
-    borderRadius: radius.lg,
-    paddingVertical: spacing.md,
-  },
-  detailBtnReverbText: {
-    fontSize: typography.sizes.base,
-    fontFamily: typography.bodySemiBold,
-    color: '#fff',
-  },
-  detailBtnWishlist: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs,
-    borderWidth: 1.5,
-    borderColor: colors.teal,
-    borderRadius: radius.lg,
-    paddingVertical: spacing.md,
-    backgroundColor: 'rgba(43,181,160,0.06)',
-  },
-  detailBtnWishlistDone: {
-    borderColor: colors.border,
-    backgroundColor: colors.background,
-  },
-  detailBtnWishlistText: {
-    fontSize: typography.sizes.base,
-    fontFamily: typography.bodySemiBold,
-    color: colors.teal,
-  },
 });

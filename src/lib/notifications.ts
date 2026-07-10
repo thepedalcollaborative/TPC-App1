@@ -17,17 +17,22 @@ import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
 import { supabase } from './supabase';
+import { isAffectedIOSVersion } from './iosVersion';
 
-// Show alerts while app is in foreground
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: false,
-    shouldSetBadge: false,
-    shouldShowBanner: true,
-    shouldShowList: true,
-  }),
-});
+// setNotificationHandler is a void TurboModule call. On iOS 26.0–26.5, the
+// TurboModule interop dispatches it on a background GCD thread → ObjC exception
+// → abort. Guard it so the import of this module is safe on those versions.
+if (!isAffectedIOSVersion()) {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: true,
+      shouldPlaySound: false,
+      shouldSetBadge: false,
+      shouldShowBanner: true,
+      shouldShowList: true,
+    }),
+  });
+}
 
 // Stable identifiers so we can cancel/replace without cancelling all
 const ID_WEEKLY_PICK    = 'tpc-weekly-pick';
@@ -68,6 +73,31 @@ export async function savePushToken(userId: string): Promise<void> {
     }
   } catch {
     // Non-critical — fail silently
+  }
+}
+
+/**
+ * Register a handler that fires when the user taps a notification.
+ * If the notification payload carries a `url` (e.g. an AWIN-wrapped Reverb
+ * listing from a price alert), open it. Returns an unsubscribe function.
+ * No-op on iOS 26.0–26.5 — the listener registration is a native call.
+ */
+export function addNotificationOpenHandler(
+  openUrl: (url: string) => void,
+): () => void {
+  if (isAffectedIOSVersion()) return () => {};
+  try {
+    const sub = Notifications.addNotificationResponseReceivedListener(response => {
+      const data = response?.notification?.request?.content?.data as
+        | { url?: string }
+        | undefined;
+      if (data?.url && typeof data.url === 'string') {
+        openUrl(data.url);
+      }
+    });
+    return () => sub.remove();
+  } catch {
+    return () => {};
   }
 }
 

@@ -285,7 +285,17 @@ export const useStore = create<Store>((set, get) => ({
 
     set({ weeklyPickLoading: true });
     try {
-      const { data, error } = await invokeEdgeFunction<WeeklyPickResponse>('weekly-pick', {});
+      // 45-second timeout guards against the weekly-pick edge function hanging
+      // on a slow Claude cold start — without it, weeklyPickLoading stays true
+      // forever if the mobile network drops mid-request.
+      const timeoutMs = 45_000;
+      const result = await Promise.race([
+        invokeEdgeFunction<WeeklyPickResponse>('weekly-pick', {}),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('weekly-pick timeout')), timeoutMs)
+        ),
+      ]);
+      const { data, error } = result;
       if (error || !data?.brand) {
         if (__DEV__) {
           const ctx = (error as { context?: { status?: number; text?: () => Promise<string> } } | null)?.context;

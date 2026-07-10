@@ -436,6 +436,9 @@ export default function HomeScreen() {
   const [weeklyWishlistState, setWeeklyWishlistState] = useState<'idle' | 'loading' | 'added' | 'exists'>('idle');
   const [trendingPedals, setTrendingPedals] = useState<TrendingPedal[]>([]);
   const [trendingWishlistStates, setTrendingWishlistStates] = useState<Record<string, 'idle' | 'loading' | 'added' | 'exists'>>({});
+  const [selectedTrending, setSelectedTrending] = useState<TrendingPedal | null>(null);
+  const [selectedTrendingDetail, setSelectedTrendingDetail] = useState<{ description: string | null; price_usd: number | null } | null>(null);
+  const [selectedTrendingWishState, setSelectedTrendingWishState] = useState<'idle' | 'loading' | 'added' | 'exists'>('idle');
   const [showVaultSnapshot, setShowVaultSnapshot] = useState(false);
   const [latestVideo, setLatestVideo] = useState<LatestVideo | null>(null);
   const isPro     = Boolean(profile?.is_premium) || hasBetaFullAccess();
@@ -718,7 +721,27 @@ export default function HomeScreen() {
               {trendingPedals.map((pedal) => {
                 const wishState = trendingWishlistStates[pedal.pedal_id] ?? 'idle';
                 return (
-                  <View key={pedal.pedal_id} style={styles.trendingRow}>
+                  <TouchableOpacity
+                    key={pedal.pedal_id}
+                    style={styles.trendingRow}
+                    activeOpacity={0.75}
+                    onPress={async () => {
+                      Haptics.selectionAsync();
+                      setSelectedTrending(pedal);
+                      setSelectedTrendingWishState(
+                        trendingWishlistStates[pedal.pedal_id] === 'added' || trendingWishlistStates[pedal.pedal_id] === 'exists'
+                          ? trendingWishlistStates[pedal.pedal_id]
+                          : 'idle'
+                      );
+                      setSelectedTrendingDetail(null);
+                      const { data } = await supabase
+                        .from('pedals')
+                        .select('description, price_usd')
+                        .eq('id', pedal.pedal_id)
+                        .maybeSingle();
+                      setSelectedTrendingDetail({ description: data?.description ?? null, price_usd: data?.price_usd ?? null });
+                    }}
+                  >
                     {pedal.image_url ? (
                       <Image source={{ uri: pedal.image_url }} style={styles.trendingThumb} resizeMode="contain" />
                     ) : (
@@ -767,7 +790,7 @@ export default function HomeScreen() {
                         <Ionicons name="add-circle-outline" size={20} color={colors.teal} />
                       )}
                     </TouchableOpacity>
-                  </View>
+                  </TouchableOpacity>
                 );
               })}
             </View>
@@ -1078,9 +1101,197 @@ export default function HomeScreen() {
           onClose={clearValueMilestone}
         />
       )}
+
+      {/* ── Trending Pedal Detail Sheet ── */}
+      <Modal
+        visible={selectedTrending !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSelectedTrending(null)}
+      >
+        <TouchableOpacity
+          style={trendDetailStyles.backdrop}
+          activeOpacity={1}
+          onPress={() => setSelectedTrending(null)}
+        />
+        {selectedTrending && (
+          <SwipeDismissSheet
+            style={[trendDetailStyles.sheet, { paddingBottom: insets.bottom + 24 }]}
+            onDismiss={() => setSelectedTrending(null)}
+          >
+            {/* Image */}
+            {selectedTrending.image_url ? (
+              <Image
+                source={{ uri: selectedTrending.image_url }}
+                style={trendDetailStyles.image}
+                resizeMode="contain"
+              />
+            ) : (
+              <View style={trendDetailStyles.imagePlaceholder}>
+                <Ionicons name="hardware-chip-outline" size={40} color={colors.textMuted} />
+              </View>
+            )}
+
+            {/* Info */}
+            <View style={trendDetailStyles.info}>
+              {selectedTrending.category && (
+                <Text style={trendDetailStyles.category}>{selectedTrending.category.toUpperCase()}</Text>
+              )}
+              <Text style={trendDetailStyles.brand}>{selectedTrending.brand}</Text>
+              <Text style={trendDetailStyles.model}>{selectedTrending.model}</Text>
+
+              <View style={trendDetailStyles.trendBadge}>
+                <Ionicons name="flame" size={12} color={colors.rose} />
+                <Text style={trendDetailStyles.trendBadgeText}>
+                  {selectedTrending.week_adds} member{selectedTrending.week_adds === 1 ? '' : 's'} added this week
+                </Text>
+              </View>
+
+              {selectedTrendingDetail === null ? (
+                <ActivityIndicator style={{ marginTop: 12 }} color={colors.teal} />
+              ) : selectedTrendingDetail.description ? (
+                <Text style={trendDetailStyles.description}>{selectedTrendingDetail.description}</Text>
+              ) : null}
+
+              {selectedTrendingDetail?.price_usd != null && (
+                <Text style={trendDetailStyles.price}>${selectedTrendingDetail.price_usd}</Text>
+              )}
+            </View>
+
+            {/* Add to Wishlist */}
+            <TouchableOpacity
+              style={[
+                trendDetailStyles.wishlistBtn,
+                selectedTrendingWishState !== 'idle' && trendDetailStyles.wishlistBtnDone,
+              ]}
+              activeOpacity={0.8}
+              disabled={selectedTrendingWishState !== 'idle'}
+              onPress={async () => {
+                if (!selectedTrending) return;
+                Haptics.selectionAsync();
+                setSelectedTrendingWishState('loading');
+                const result = await addToWishlist(selectedTrending.brand, selectedTrending.model, {
+                  category: selectedTrending.category ?? 'other',
+                  subcategory: 'Trending',
+                  description: selectedTrendingDetail?.description ?? '',
+                  analog: false,
+                  price: selectedTrendingDetail?.price_usd ?? null,
+                });
+                const next = result === 'added' ? 'added' : result === 'exists' ? 'exists' : 'idle';
+                setSelectedTrendingWishState(next);
+                if (next !== 'idle') {
+                  setTrendingWishlistStates(prev => ({ ...prev, [selectedTrending.pedal_id]: next }));
+                }
+              }}
+            >
+              {selectedTrendingWishState === 'loading' ? (
+                <ActivityIndicator color="#fff" />
+              ) : selectedTrendingWishState === 'added' ? (
+                <Text style={trendDetailStyles.wishlistBtnText}>Added to GAS List ✓</Text>
+              ) : selectedTrendingWishState === 'exists' ? (
+                <Text style={trendDetailStyles.wishlistBtnText}>Already on your GAS List</Text>
+              ) : (
+                <Text style={trendDetailStyles.wishlistBtnText}>Add to GAS List</Text>
+              )}
+            </TouchableOpacity>
+          </SwipeDismissSheet>
+        )}
+      </Modal>
     </>
   );
 }
+
+const trendDetailStyles = StyleSheet.create({
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  sheet: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 24,
+    paddingTop: 20,
+  },
+  image: {
+    width: '100%',
+    height: 180,
+    marginBottom: 16,
+  },
+  imagePlaceholder: {
+    width: '100%',
+    height: 120,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceHigh,
+    borderRadius: 12,
+    marginBottom: 16,
+  },
+  info: {
+    gap: 4,
+    marginBottom: 20,
+  },
+  category: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: 10,
+    color: colors.textMuted,
+    letterSpacing: 1,
+  },
+  brand: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: 14,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  model: {
+    fontFamily: typography.display,
+    fontSize: 24,
+    color: colors.textPrimary,
+    lineHeight: 28,
+  },
+  trendBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 6,
+  },
+  trendBadgeText: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: 12,
+    color: colors.rose,
+  },
+  description: {
+    fontFamily: typography.body,
+    fontSize: 14,
+    color: colors.textSecondary,
+    lineHeight: 20,
+    marginTop: 8,
+  },
+  price: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: 15,
+    color: colors.textPrimary,
+    marginTop: 6,
+  },
+  wishlistBtn: {
+    backgroundColor: colors.teal,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  wishlistBtnDone: {
+    backgroundColor: colors.textMuted,
+  },
+  wishlistBtnText: {
+    fontFamily: typography.bodySemiBold,
+    fontSize: 15,
+    color: '#fff',
+  },
+});
 
 // ─── Sub-component styles ─────────────────────────────────────────────────────
 

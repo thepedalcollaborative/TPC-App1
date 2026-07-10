@@ -32,6 +32,7 @@ import {
   scheduleReengagementNotification,
   savePushToken,
   cancelAllTpcNotifications,
+  addNotificationOpenHandler,
 } from './src/lib/notifications';
 import { colors, typography } from './src/theme';
 import { PlayerOnboarding, PostOnboardingScreen, WelcomeOnboarding } from './src/components';
@@ -510,6 +511,14 @@ export default function App() {
       savePushToken(userId).catch(() => {});
     })();
   }, [session?.user?.id]);
+
+  // Open AWIN-wrapped listing links when the user taps a price-drop push.
+  // (No-op on iOS 26.0–26.5 — registration is a native call.)
+  useEffect(() => {
+    return addNotificationOpenHandler(url => {
+      Linking.openURL(url).catch(() => {});
+    });
+  }, []);
 
   // Keep the weekly vault digest content in sync with live collection/value.
   useEffect(() => {

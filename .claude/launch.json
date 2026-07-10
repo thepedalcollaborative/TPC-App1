@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tpc-web-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/Users/alanjohnson/Documents/TPC/tpc-web", "run", "dev"],
+      "port": 3000
+    },
+    {
+      "name": "welcome-preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", "-l", "4321", "/Users/alanjohnson/Documents/TPC/TPC-App1/.preview"],
+      "port": 4321
+    }
+  ]
+}

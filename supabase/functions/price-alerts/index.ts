@@ -55,7 +55,6 @@ type WishlistItem = {
   target_price: number;
   price_alert_sent_at: string | null;
   pedal: { brand: string; model: string } | null;
-  user: { push_token: string | null } | null;
 };
 
 type ExpoPushMessage = {
@@ -69,19 +68,36 @@ type ExpoPushMessage = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Search Reverb for listings of a pedal and return the lowest listed price. */
-async function lowestReverbPrice(brand: string, model: string): Promise<number | null> {
+// AWIN affiliate wrapping — must match src/lib/reverb.ts in the app
+const AWIN_MID   = '67144';
+const AWIN_AFFID = '1515586';
+function awinUrl(reverbUrl: string): string {
+  return `https://www.awin1.com/cread.php?awinmid=${AWIN_MID}&awinaffid=${AWIN_AFFID}&ued=${encodeURIComponent(reverbUrl)}`;
+}
+
+type LowestListing = { price: number; url: string | null };
+
+/** Search Reverb for listings of a pedal and return the lowest-priced one. */
+async function lowestReverbListing(brand: string, model: string): Promise<LowestListing | null> {
   try {
     const query  = encodeURIComponent(`${brand} ${model}`);
     const url    = `https://api.reverb.com/api/listings?query=${query}&condition=all&per_page=10&sort=price_asc`;
     const res    = await fetch(url, { headers: REVERB_HEADERS });
     if (!res.ok) return null;
     const json   = await res.json();
-    const listings = (json?.listings ?? []) as Array<{ price?: { amount?: string } }>;
-    const prices = listings
-      .map(l => parseFloat(l?.price?.amount ?? ''))
-      .filter(p => !isNaN(p) && p > 0);
-    return prices.length > 0 ? Math.min(...prices) : null;
+    const listings = (json?.listings ?? []) as Array<{
+      price?: { amount?: string };
+      _links?: { web?: { href?: string } };
+    }>;
+    let best: LowestListing | null = null;
+    for (const l of listings) {
+      const price = parseFloat(l?.price?.amount ?? '');
+      if (isNaN(price) || price <= 0) continue;
+      if (!best || price < best.price) {
+        best = { price, url: l?._links?.web?.href ?? null };
+      }
+    }
+    return best;
   } catch {
     return null;
   }
@@ -118,6 +134,9 @@ serve(async (req) => {
 
     // Fetch all wishlist items with a target price, plus their push token
     const cooldownCutoff = new Date(Date.now() - ALERT_COOLDOWN_H * 60 * 60 * 1000).toISOString();
+    // No FK between user_pedals.user_id and user_profiles (it references
+    // auth.users), so PostgREST can't embed the profile — fetch push tokens
+    // in a second query instead.
     const { data, error } = await supabase
       .from('user_pedals')
       .select(`
@@ -125,8 +144,7 @@ serve(async (req) => {
         user_id,
         target_price,
         price_alert_sent_at,
-        pedal:pedals ( brand, model ),
-        user:user_profiles ( push_token )
+        pedal:pedals ( brand, model )
       `)
       .eq('status', 'wishlist')
       .not('target_price', 'is', null)
@@ -135,6 +153,20 @@ serve(async (req) => {
     if (error) throw error;
 
     const items = (data ?? []) as WishlistItem[];
+
+    const userIds = [...new Set(items.map(i => i.user_id))];
+    const pushTokens = new Map<string, string>();
+    if (userIds.length > 0) {
+      const { data: profiles, error: profErr } = await supabase
+        .from('user_profiles')
+        .select('id, push_token')
+        .in('id', userIds)
+        .not('push_token', 'is', null);
+      if (profErr) throw profErr;
+      for (const p of (profiles ?? []) as Array<{ id: string; push_token: string | null }>) {
+        if (p.push_token) pushTokens.set(p.id, p.push_token);
+      }
+    }
     if (items.length === 0) {
       return new Response(JSON.stringify({ checked: 0, alerts: 0 }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -145,20 +177,26 @@ serve(async (req) => {
     const alertedIds: string[] = [];
 
     for (const item of items) {
-      const pushToken = item.user?.push_token;
+      const pushToken = pushTokens.get(item.user_id);
       if (!pushToken || !pushToken.startsWith('ExponentPushToken')) continue;
       if (!item.pedal?.brand || !item.pedal?.model) continue;
 
-      const lowest = await lowestReverbPrice(item.pedal.brand, item.pedal.model);
-      if (lowest === null || lowest > item.target_price) continue;
+      const lowest = await lowestReverbListing(item.pedal.brand, item.pedal.model);
+      if (lowest === null || lowest.price > item.target_price) continue;
 
-      // Price is at or below target — queue a notification
+      // Price is at or below target — queue a notification.
+      // `url` is the AWIN-wrapped direct listing link; tapping the notification
+      // opens it (see notification response handler in App.tsx). Falls back to
+      // an AWIN-wrapped search when the listing URL is missing.
+      const buyUrl = lowest.url
+        ? awinUrl(lowest.url)
+        : awinUrl(`https://reverb.com/marketplace?query=${encodeURIComponent(`${item.pedal.brand} ${item.pedal.model}`)}`);
       pushMessages.push({
         to:    pushToken,
         sound: 'default',
         title: `Price drop: ${item.pedal.brand} ${item.pedal.model} 🎯`,
-        body:  `Listed at $${Math.round(lowest)} on Reverb — your target is $${Math.round(item.target_price)}.`,
-        data:  { screen: 'Vault', tab: 'wishlist', pedalId: item.id },
+        body:  `Listed at $${Math.round(lowest.price)} on Reverb — your target is $${Math.round(item.target_price)}. Tap to view.`,
+        data:  { screen: 'Vault', tab: 'wishlist', pedalId: item.id, url: buyUrl },
       });
       alertedIds.push(item.id);
     }
@@ -179,8 +217,11 @@ serve(async (req) => {
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
   } catch (err) {
+    const detail = err instanceof Error
+      ? err.message
+      : JSON.stringify(err); // Supabase query errors are plain objects
     return new Response(
-      JSON.stringify({ error: String(err) }),
+      JSON.stringify({ error: detail }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
   }

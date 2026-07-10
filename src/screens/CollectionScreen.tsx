@@ -38,7 +38,7 @@ import { NetworkErrorView } from '../components/NetworkErrorView';
 import { classifyError, extractHttpStatus, type ClassifiedError } from '../lib/networkError';
 import type { CollectionPedal, PriceMode } from '../components';
 import { TabParamList } from '../types/navigation';
-import { reverbSearchUrl } from '../lib/reverb';
+import { reverbSearchUrl, reverbAffiliateUrl } from '../lib/reverb';
 import { shareGasList, shareNewPedal, shareFsftList, shareCollectionList, shareAsImage, type FsftPedal } from '../lib/share';
 import { hasBetaFullAccess } from '../lib/subscription';
 import { useFormatMoney } from '../hooks/useFormatMoney';
@@ -668,6 +668,7 @@ export default function CollectionScreen() {
   const [detailUserImageUrl, setDetailUserImageUrl] = useState<string | null>(null);
   const [detailImageFailed, setDetailImageFailed] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [demoLoading, setDemoLoading] = useState(false);
   const [wishlistListings, setWishlistListings] = useState<Array<{ title: string; price: number | null; currency: string | null; condition: string | null; date: string | null; url: string | null; photo_url?: string | null }>>([]);
   const [wishlistSort, setWishlistSort] = useState<'newest' | 'price'>('newest');
   const [wishlistLoading, setWishlistLoading] = useState(false);
@@ -1135,6 +1136,32 @@ export default function CollectionScreen() {
     }
     options.push({ text: 'Cancel', style: 'cancel' });
     Alert.alert('Pedal Photo', undefined, options);
+  };
+
+  // Watch Demo — TPC channel video for this pedal if one exists, otherwise the
+  // most-viewed YouTube demo. Fetched on tap (not on detail open) to conserve
+  // YouTube API quota.
+  const handleWatchDemo = async () => {
+    if (!detailPedal?.pedal) return;
+    const { brand, model } = detailPedal.pedal;
+    Haptics.selectionAsync();
+    setDemoLoading(true);
+    try {
+      const { data } = await invokeEdgeFunction<{ video: { id: string; title: string; isTpc: boolean } | null }>(
+        'youtube-videos',
+        { mode: 'demo', query: `${brand} ${model} pedal` },
+      );
+      if (data?.video?.id) {
+        await Linking.openURL(`https://www.youtube.com/watch?v=${data.video.id}`);
+      } else {
+        // No API hit — fall back to a YouTube search in the browser
+        await Linking.openURL(`https://www.youtube.com/results?search_query=${encodeURIComponent(`${brand} ${model} pedal demo`)}`);
+      }
+    } catch {
+      Alert.alert('Could not load video', 'Please try again.');
+    } finally {
+      setDemoLoading(false);
+    }
   };
 
   const handleRemovePhoto = async () => {
@@ -2060,7 +2087,9 @@ export default function CollectionScreen() {
                                   key={`${l.title}-${idx}`}
                                   style={styles.wishlistRow}
                                   activeOpacity={0.8}
-                                  onPress={openSearch}
+                                  // Specific listing → Awin-wrapped direct link (higher conversion
+                                  // than dumping the user on a search page). Fallback: search.
+                                  onPress={() => l.url ? Linking.openURL(reverbAffiliateUrl(l.url)) : openSearch()}
                                 >
                                   <View style={styles.wishlistTextBlock}>
                                     <Text style={styles.wishlistTitle} numberOfLines={2}>{l.title}</Text>
@@ -2186,6 +2215,21 @@ export default function CollectionScreen() {
                           <Text style={styles.detailPhotoBtnText}>
                             {detailPedal?.user_image_path ? 'Change Photo' : 'Add Photo'}
                           </Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.detailPhotoBtn}
+                      onPress={handleWatchDemo}
+                      activeOpacity={0.8}
+                      disabled={demoLoading}
+                    >
+                      {demoLoading ? (
+                        <ActivityIndicator color={colors.teal} />
+                      ) : (
+                        <>
+                          <Ionicons name="logo-youtube" size={18} color={colors.teal} />
+                          <Text style={styles.detailPhotoBtnText}>Watch Demo</Text>
                         </>
                       )}
                     </TouchableOpacity>

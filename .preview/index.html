@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TPC Welcome Onboarding Preview</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #1a1a1a;
+    font-family: 'Inter', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px;
+    gap: 24px;
+  }
+
+  h1 {
+    color: #666;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+  }
+
+  .screen-row {
+    display: flex;
+    gap: 28px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .phone-wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+
+  .phone {
+    width: 320px;
+    background: #F7F4F0;
+    border-radius: 44px;
+    padding: 48px 0 28px;
+    box-shadow: 0 28px 70px rgba(0,0,0,0.55), inset 0 0 0 1.5px rgba(255,255,255,0.07);
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .phone::before {
+    content: '';
+    position: absolute;
+    top: 15px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 90px;
+    height: 5px;
+    background: #2a2a2a;
+    border-radius: 3px;
+  }
+
+  .screen-label {
+    color: #555;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.8px;
+    text-transform: uppercase;
+  }
+
+  /* ── Top Bar ── */
+  .top-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px 14px;
+  }
+
+  .app-icon {
+    height: 32px;
+    width: auto;
+    display: flex;
+    align-items: center;
+  }
+
+  .app-icon img {
+    height: 32px;
+    width: auto;
+    object-fit: contain;
+  }
+
+  .sign-in-btn {
+    border: 1px solid #E2DDD7;
+    background: white;
+    border-radius: 999px;
+    padding: 5px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    color: #5E7585;
+  }
+
+  /* ── Visual Area ── */
+  .visual-area {
+    padding: 0 20px;
+    margin-bottom: 14px;
+    min-height: 250px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 10px;
+  }
+
+  /* ── Text Block ── */
+  .text-block {
+    padding: 0 20px;
+    margin-bottom: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .slide-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: #2D8A7E;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+
+  .headline {
+    font-size: 21px;
+    font-weight: 800;
+    color: #3D5261;
+    line-height: 1.25;
+  }
+
+  .sub {
+    font-size: 12.5px;
+    color: #5E7585;
+    line-height: 1.55;
+    margin-top: 2px;
+  }
+
+  /* ── Bottom ── */
+  .bottom-area {
+    padding: 0 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .dots {
+    display: flex;
+    gap: 7px;
+    align-items: center;
+  }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: #E2DDD7;
+  }
+
+  .dot.active {
+    width: 22px;
+    background: #2D8A7E;
+  }
+
+  .cta-btn {
+    width: 100%;
+    background: linear-gradient(135deg, #2D8A7E, #216E64);
+    border-radius: 18px;
+    padding: 15px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: white;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+  }
+
+  .already {
+    font-size: 11.5px;
+    color: #8FA3AE;
+  }
+
+  .already span {
+    color: #2D8A7E;
+    font-weight: 600;
+  }
+
+  /* ══════════════════════════════════════
+     SCREEN 1: The Hook
+     Intentional icons: drive, delay, reverb,
+     modulation, vault, AI, boards, advisor
+  ══════════════════════════════════════ */
+
+  .icon-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+    margin-bottom: 6px;
+  }
+
+  .icon-tile {
+    width: 52px;
+    height: 52px;
+    border-radius: 13px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+  }
+
+  .icon-tile svg { flex-shrink: 0; }
+
+  .icon-tile-label {
+    font-size: 7px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+  }
+
+  .count-card {
+    background: linear-gradient(135deg, #2D8A7E, #216E64);
+    border-radius: 18px;
+    padding: 16px 20px;
+    text-align: center;
+  }
+
+  .count-card-label {
+    font-size: 9px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.6);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+
+  .count-card-number {
+    font-size: 38px;
+    font-weight: 900;
+    color: white;
+    margin: 2px 0;
+    letter-spacing: -1px;
+  }
+
+  .count-card-sub {
+    font-size: 11px;
+    color: rgba(255,255,255,0.5);
+  }
+
+  /* ══════════════════════════════════════
+     SCREEN 2: Vault
+  ══════════════════════════════════════ */
+
+  .value-pill {
+    background: white;
+    border-radius: 18px;
+    padding: 13px 20px;
+    text-align: center;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+    margin-bottom: 4px;
+  }
+
+  .value-pill-label {
+    font-size: 9px;
+    font-weight: 600;
+    color: #8FA3AE;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+  }
+
+  .value-pill-amount {
+    font-size: 32px;
+    font-weight: 900;
+    color: #3D5261;
+    letter-spacing: -1px;
+    margin: 2px 0;
+  }
+
+  .value-pill-delta {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #1A8C40;
+  }
+
+  .pedal-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+
+  .pedal-card {
+    width: calc(33.33% - 5px);
+    background: white;
+    border-radius: 10px;
+    padding: 8px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+  }
+
+  .pedal-cat-badge {
+    border-radius: 4px;
+    padding: 2px 6px;
+    display: inline-block;
+    font-size: 7.5px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    margin-bottom: 4px;
+  }
+
+  .pedal-name {
+    font-size: 10px;
+    font-weight: 600;
+    color: #3D5261;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ══════════════════════════════════════
+     SCREEN 3: Expert (personalized)
+  ══════════════════════════════════════ */
+
+  .profile-pills {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+
+  .profile-pill {
+    background: white;
+    border: 1px solid #E2DDD7;
+    border-radius: 999px;
+    padding: 5px 11px;
+    font-size: 10px;
+    font-weight: 600;
+    color: #5E7585;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .profile-pill .dot-indicator {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+
+  .expert-card {
+    background: linear-gradient(145deg, #3D5261, #2A3E4E);
+    border-radius: 18px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .expert-top-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .expert-badge {
+    background: rgba(255,255,255,0.12);
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 8px;
+    font-weight: 700;
+    color: rgba(255,255,255,0.65);
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+  }
+
+  .expert-for-you {
+    font-size: 9px;
+    font-weight: 600;
+    color: #2D8A7E;
+    background: rgba(45,138,126,0.15);
+    border: 1px solid rgba(45,138,126,0.3);
+    border-radius: 999px;
+    padding: 3px 9px;
+  }
+
+  .expert-brand {
+    font-size: 11px;
+    font-weight: 500;
+    color: rgba(255,255,255,0.5);
+    margin-top: 2px;
+  }
+
+  .expert-model {
+    font-size: 26px;
+    font-weight: 900;
+    color: white;
+    letter-spacing: -0.5px;
+    margin-top: -2px;
+  }
+
+  .match-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-top: 2px;
+  }
+
+  .match-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .match-bar-label {
+    font-size: 9px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.5);
+    width: 52px;
+    flex-shrink: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+
+  .match-bar-track {
+    flex: 1;
+    height: 5px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+
+  .match-bar-fill {
+    height: 100%;
+    background: #2D8A7E;
+    border-radius: 999px;
+  }
+
+  .match-bar-pct {
+    font-size: 9px;
+    font-weight: 700;
+    color: rgba(255,255,255,0.6);
+    width: 26px;
+    text-align: right;
+  }
+
+  .expert-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 2px;
+  }
+
+  .expert-price-badge {
+    display: inline-block;
+    background: #2D8A7E;
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 11px;
+    font-weight: 700;
+    color: white;
+  }
+
+  .expert-reverb-note {
+    font-size: 10px;
+    color: rgba(255,255,255,0.4);
+  }
+
+  /* ══════════════════════════════════════
+     SCREEN 4: Advisor
+  ══════════════════════════════════════ */
+
+  .chat-area {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .bubble {
+    max-width: 92%;
+    border-radius: 14px;
+    padding: 9px 13px;
+  }
+
+  .bubble.user {
+    align-self: flex-end;
+    background: #3D5261;
+    color: white;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.45;
+  }
+
+  .bubble.ai {
+    align-self: flex-start;
+    background: white;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+  }
+
+  .ai-label {
+    font-size: 9px;
+    font-weight: 700;
+    color: #2D8A7E;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+
+  .bubble.ai p {
+    font-size: 11.5px;
+    color: #3D5261;
+    line-height: 1.5;
+  }
+
+</style>
+</head>
+<body>
+
+<h1>TPC Welcome Onboarding — Screen Preview</h1>
+
+<div class="screen-row">
+
+  <!-- ══ SCREEN 1: THE HOOK ══ -->
+  <div class="phone-wrap">
+    <div class="screen-label">Screen 1 · The Hook</div>
+    <div class="phone">
+      <div class="top-bar">
+        <div class="app-icon"><img src="splash-icon.png" /></div>
+        <div class="sign-in-btn">Sign In</div>
+      </div>
+
+      <div class="visual-area">
+        <!-- 8 intentional tiles: the 4 app pillars + 4 pedal categories -->
+        <div class="icon-grid">
+
+          <!-- Vault -->
+          <div class="icon-tile" style="background:#EEF8F7;">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2D8A7E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><circle cx="12" cy="12" r="1" fill="#2D8A7E"/></svg>
+            <span class="icon-tile-label" style="color:#2D8A7E;">Vault</span>
+          </div>
+
+          <!-- Drive (overdrive/distortion) -->
+          <div class="icon-tile" style="background:#FDF2EC;">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#C45208" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            <span class="icon-tile-label" style="color:#C45208;">Drive</span>
+          </div>
+
+          <!-- AI / Custom Shop -->
+          <div class="icon-tile" style="background:#EEF8F7;">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2D8A7E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z"/></svg>
+            <span class="icon-tile-label" style="color:#2D8A7E;">AI Pick</span>
+          </div>
+
+          <!-- Delay -->
+          <div class="icon-tile" style="background:#EEF2FF;">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2563EB" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z"/><path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>
+            <span class="icon-tile-label" style="color:#2563EB;">Delay</span>
+          </div>
+
+          <!-- Reverb -->
+          <div class="icon-tile" style="background:#F5F3FF;">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8B5CF6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2"/></svg>
+            <span class="icon-tile-label" style="color:#8B5CF6;">Reverb</span>
+          </div>
+
+          <!-- Boards -->
+          <div class="icon-tile" style="background:#FFF7ED;">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#F97316" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+            <span class="icon-tile-label" style="color:#F97316;">Boards</span>
+          </div>
+
+          <!-- Modulation -->
+          <div class="icon-tile" style="background:#FDF2F8;">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#EC4899" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12 C5 6, 9 6, 12 12 S19 18, 22 12"/></svg>
+            <span class="icon-tile-label" style="color:#EC4899;">Mod</span>
+          </div>
+
+          <!-- Advisor / Chat -->
+          <div class="icon-tile" style="background:#F0FDF4;">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#1A8C40" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <span class="icon-tile-label" style="color:#1A8C40;">Advisor</span>
+          </div>
+
+        </div>
+
+        <div class="count-card">
+          <div class="count-card-label">Pedals Tracked Globally</div>
+          <div class="count-card-number">12,847</div>
+          <div class="count-card-sub">and counting</div>
+        </div>
+      </div>
+
+      <div class="text-block">
+        <div class="slide-label">Welcome to TPC</div>
+        <div class="headline">How many pedals have you owned?</div>
+        <div class="sub">Most guitarists can't even count. We built the app for that — and everything that comes after.</div>
+      </div>
+
+      <div class="bottom-area">
+        <div class="dots">
+          <div class="dot active"></div>
+          <div class="dot"></div>
+          <div class="dot"></div>
+          <div class="dot"></div>
+        </div>
+        <div class="cta-btn">Next →</div>
+        <div class="already">Already have an account? <span>Sign In</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ SCREEN 2: VAULT ══ -->
+  <div class="phone-wrap">
+    <div class="screen-label">Screen 2 · Your Vault</div>
+    <div class="phone">
+      <div class="top-bar">
+        <div class="app-icon"><img src="splash-icon.png" /></div>
+        <div class="sign-in-btn">Sign In</div>
+      </div>
+
+      <div class="visual-area">
+        <div class="value-pill">
+          <div class="value-pill-label">Est. Collection Value</div>
+          <div class="value-pill-amount">$4,240</div>
+          <div class="value-pill-delta">↑ +$320 vs. paid</div>
+        </div>
+        <div class="pedal-grid">
+          <div class="pedal-card">
+            <span class="pedal-cat-badge" style="background:#C4520818;color:#C45208">DRIVE</span>
+            <div class="pedal-name">Klon Centaur</div>
+          </div>
+          <div class="pedal-card">
+            <span class="pedal-cat-badge" style="background:#C4520818;color:#C45208">DRIVE</span>
+            <div class="pedal-name">Big Muff Pi</div>
+          </div>
+          <div class="pedal-card">
+            <span class="pedal-cat-badge" style="background:#2563EB18;color:#2563EB">DELAY</span>
+            <div class="pedal-name">DD-8</div>
+          </div>
+          <div class="pedal-card">
+            <span class="pedal-cat-badge" style="background:#8B5CF618;color:#8B5CF6">REVERB</span>
+            <div class="pedal-name">Holy Grail</div>
+          </div>
+          <div class="pedal-card">
+            <span class="pedal-cat-badge" style="background:#EC489918;color:#EC4899">MOD</span>
+            <div class="pedal-name">CE-2W</div>
+          </div>
+          <div class="pedal-card">
+            <span class="pedal-cat-badge" style="background:#F9731618;color:#F97316">MULTI</span>
+            <div class="pedal-name">Eventide H9</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="text-block">
+        <div class="slide-label">Your Vault</div>
+        <div class="headline">Every pedal you've ever owned — and what it's worth.</div>
+        <div class="sub">Log your collection, see live market values from Reverb, and track if your gear is appreciating.</div>
+      </div>
+
+      <div class="bottom-area">
+        <div class="dots">
+          <div class="dot"></div>
+          <div class="dot active"></div>
+          <div class="dot"></div>
+          <div class="dot"></div>
+        </div>
+        <div class="cta-btn">Next →</div>
+        <div class="already">Already have an account? <span>Sign In</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ SCREEN 3: EXPERT (PERSONALIZED) ══ -->
+  <div class="phone-wrap">
+    <div class="screen-label">Screen 3 · Your AI Expert</div>
+    <div class="phone">
+      <div class="top-bar">
+        <div class="app-icon"><img src="splash-icon.png" /></div>
+        <div class="sign-in-btn">Sign In</div>
+      </div>
+
+      <div class="visual-area">
+        <!-- Profile context pills — "built from your answers" -->
+        <div class="profile-pills">
+          <div class="profile-pill">
+            <div class="dot-indicator" style="background:#C45208;"></div>
+            Fender Strat
+          </div>
+          <div class="profile-pill">
+            <div class="dot-indicator" style="background:#2563EB;"></div>
+            Blues / Rock
+          </div>
+          <div class="profile-pill">
+            <div class="dot-indicator" style="background:#2D8A7E;"></div>
+            Budget ~$400
+          </div>
+          <div class="profile-pill">
+            <div class="dot-indicator" style="background:#8B5CF6;"></div>
+            Vox AC15
+          </div>
+        </div>
+
+        <div class="expert-card">
+          <div class="expert-top-row">
+            <div class="expert-badge">✦ Custom Shop Pick</div>
+            <div class="expert-for-you">Made for you</div>
+          </div>
+          <div class="expert-brand">Strymon</div>
+          <div class="expert-model">Timeline</div>
+
+          <!-- Match bars: personalization proof -->
+          <div class="match-bars">
+            <div class="match-bar-row">
+              <div class="match-bar-label">Tone</div>
+              <div class="match-bar-track"><div class="match-bar-fill" style="width:94%"></div></div>
+              <div class="match-bar-pct">94%</div>
+            </div>
+            <div class="match-bar-row">
+              <div class="match-bar-label">Rig fit</div>
+              <div class="match-bar-track"><div class="match-bar-fill" style="width:98%"></div></div>
+              <div class="match-bar-pct">98%</div>
+            </div>
+            <div class="match-bar-row">
+              <div class="match-bar-label">Budget</div>
+              <div class="match-bar-track"><div class="match-bar-fill" style="width:88%"></div></div>
+              <div class="match-bar-pct">88%</div>
+            </div>
+          </div>
+
+          <div class="expert-footer">
+            <span class="expert-price-badge">~$350 used</span>
+            <span class="expert-reverb-note">Live on Reverb</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="text-block">
+        <div class="slide-label">Your AI Expert</div>
+        <div class="headline">Stop guessing what to buy next.</div>
+        <div class="sub">Tell us your rig once. Get one perfect pick — matched to your tone, your amp, and your budget.</div>
+      </div>
+
+      <div class="bottom-area">
+        <div class="dots">
+          <div class="dot"></div>
+          <div class="dot"></div>
+          <div class="dot active"></div>
+          <div class="dot"></div>
+        </div>
+        <div class="cta-btn">Next →</div>
+        <div class="already">Already have an account? <span>Sign In</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ SCREEN 4: ADVISOR ══ -->
+  <div class="phone-wrap">
+    <div class="screen-label">Screen 4 · Ask Anything</div>
+    <div class="phone">
+      <div class="top-bar">
+        <div class="app-icon"><img src="splash-icon.png" /></div>
+        <div class="sign-in-btn">Sign In</div>
+      </div>
+
+      <div class="visual-area">
+        <div class="chat-area">
+          <div class="bubble user">Should my compressor go before or after my overdrive?</div>
+          <div class="bubble ai">
+            <div class="ai-label">✦ TPC Advisor</div>
+            <p>Before, almost always. Before drive = tighter, more even signal. After drive = squashes the character you just created.</p>
+          </div>
+          <div class="bubble user">What about with fuzz?</div>
+          <div class="bubble ai">
+            <div class="ai-label">✦ TPC Advisor</div>
+            <p>Fuzz is the exception — it's picky about impedance. Compressor after fuzz, or skip it. Fuzz loves to breathe.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="text-block">
+        <div class="slide-label">Ask Anything</div>
+        <div class="headline">Questions at 2am. Answered.</div>
+        <div class="sub">Signal chain, tone chasing, gear compatibility — your AI advisor has deep gear knowledge and knows your board.</div>
+      </div>
+
+      <div class="bottom-area">
+        <div class="dots">
+          <div class="dot"></div>
+          <div class="dot"></div>
+          <div class="dot"></div>
+          <div class="dot active"></div>
+        </div>
+        <div class="cta-btn">Get Started — It's Free →</div>
+        <div class="already">Already have an account? <span>Sign In</span></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

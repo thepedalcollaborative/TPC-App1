@@ -45,6 +45,39 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const query: string = body.query ?? '';
     const pageToken: string = body.pageToken ?? '';
+    // 'demo' mode: find the best demo video for a pedal. Searches the TPC
+    // channel first; if no hit, falls back to a global most-viewed search.
+    // Returns { video: { id, title, isTpc } | null }.
+    const mode: string = body.mode ?? 'list';
+
+    if (mode === 'demo') {
+      if (!query.trim()) {
+        return new Response(JSON.stringify({ video: null }), {
+          headers: { ...CORS, 'Content-Type': 'application/json' },
+        });
+      }
+      const search = async (global: boolean) => {
+        const p = new URLSearchParams({
+          part: 'snippet',
+          type: 'video',
+          q: query.trim(),
+          maxResults: '1',
+          key: YOUTUBE_API_KEY,
+          ...(global ? { order: 'viewCount' } : { channelId: CHANNEL_ID, order: 'relevance' }),
+        });
+        const res = await fetch(`https://www.googleapis.com/youtube/v3/search?${p}`);
+        if (!res.ok) return null;
+        const json = await res.json();
+        const item = (json?.items ?? [])[0];
+        const videoId = item?.id?.videoId as string | undefined;
+        if (!videoId) return null;
+        return { id: videoId, title: (item?.snippet?.title as string) ?? '', isTpc: !global };
+      };
+      const video = (await search(false)) ?? (await search(true));
+      return new Response(JSON.stringify({ video }), {
+        headers: { ...CORS, 'Content-Type': 'application/json' },
+      });
+    }
 
     const params = new URLSearchParams({
       part: 'snippet',

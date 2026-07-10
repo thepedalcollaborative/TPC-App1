@@ -16,7 +16,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, typography, spacing, radius, gradients } from '../theme';
 import { useStore } from '../hooks/useStore';
-import { supabase, Pedal } from '../lib/supabase';
+import { supabase, invokeEdgeFunction, Pedal, PedalPhoto } from '../lib/supabase';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -64,6 +64,8 @@ type PedalEditState = {
   analog: boolean;
   in_production: boolean;
   image_url: string;
+  version_label: string;
+  manual_url: string;
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -80,6 +82,7 @@ function getWeekKey(): string {
 const BLANK_PEDAL: PedalEditState = {
   brand: '', model: '', category: '', subcategory: '',
   description: '', analog: false, in_production: true, image_url: '',
+  version_label: '', manual_url: '',
 };
 
 const TABS: { key: AdminTab; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
@@ -109,6 +112,9 @@ export default function AdminScreen() {
   const [editState, setEditState] = useState<PedalEditState>(BLANK_PEDAL);
   const [addState, setAddState] = useState<PedalEditState>(BLANK_PEDAL);
   const [catalogLoading, setCatalogLoading] = useState(false);
+  const [pedalPhotos, setPedalPhotos] = useState<PedalPhoto[]>([]);
+  const [newPhotoUrl, setNewPhotoUrl] = useState('');
+  const [mirroringManual, setMirroringManual] = useState(false);
 
   // Weekly pick
   const [wpQuery, setWpQuery] = useState('');
@@ -165,7 +171,19 @@ export default function AdminScreen() {
       analog:       p.analog,
       in_production: p.in_production,
       image_url:    p.image_url ?? '',
+      version_label: p.version_label ?? '',
+      manual_url:   p.manual_url ?? '',
     });
+    loadPedalPhotos(p.id);
+  };
+
+  const loadPedalPhotos = async (pedalId: string) => {
+    const { data } = await supabase
+      .from('pedal_photos')
+      .select('*')
+      .eq('pedal_id', pedalId)
+      .order('position', { ascending: true });
+    setPedalPhotos((data as PedalPhoto[]) ?? []);
   };
 
   const handleSaveEdit = async () => {
@@ -174,22 +192,22 @@ export default function AdminScreen() {
       Alert.alert('Missing fields', 'Brand, model, and category are required.');
       return;
     }
-    const { error } = await supabase
-      .from('pedals')
-      .update({
-        brand:        editState.brand.trim(),
-        model:        editState.model.trim(),
-        category:     editState.category.trim(),
-        subcategory:  editState.subcategory.trim(),
-        description:  editState.description.trim() || null,
-        analog:       editState.analog,
-        in_production: editState.in_production,
-        image_url:    editState.image_url.trim() || null,
-        image_source: editState.image_url.trim() ? 'manufacturer' : null,
-      })
-      .eq('id', selectedPedal.id);
-    if (error) {
-      Alert.alert('Save failed', error.message);
+    const { data, error } = await supabase.rpc('admin_update_pedal', {
+      p_pedal_id:      selectedPedal.id,
+      p_brand:         editState.brand.trim(),
+      p_model:         editState.model.trim(),
+      p_category:      editState.category.trim(),
+      p_subcategory:   editState.subcategory.trim(),
+      p_description:   editState.description.trim() || null,
+      p_analog:        editState.analog,
+      p_in_production: editState.in_production,
+      p_image_url:     editState.image_url.trim() || null,
+      p_version_label: editState.version_label.trim() || null,
+      p_manual_url:    editState.manual_url.trim() || null,
+    });
+    const result = data as { ok: boolean; error?: string } | null;
+    if (error || !result?.ok) {
+      Alert.alert('Save failed', error?.message ?? result?.error ?? 'Unknown error');
       return;
     }
     Alert.alert('Saved', `${editState.brand} ${editState.model} updated.`);
@@ -209,6 +227,8 @@ export default function AdminScreen() {
       p_analog:        addState.analog,
       p_in_production: addState.in_production,
       p_image_url:     addState.image_url.trim() || null,
+      p_version_label: addState.version_label.trim() || null,
+      p_manual_url:    addState.manual_url.trim() || null,
     });
     const result = data as { ok: boolean; error?: string } | null;
     if (error || !result?.ok) {
@@ -217,6 +237,55 @@ export default function AdminScreen() {
     }
     Alert.alert('Added', `${addState.brand} ${addState.model} added to catalog.`);
     setAddState(BLANK_PEDAL);
+  };
+
+  const handleAddPhoto = async () => {
+    if (!selectedPedal || !newPhotoUrl.trim()) return;
+    const { data, error } = await supabase
+      .from('pedal_photos')
+      .insert({
+        pedal_id: selectedPedal.id,
+        url: newPhotoUrl.trim(),
+        position: pedalPhotos.length,
+      })
+      .select()
+      .single();
+    if (error) {
+      Alert.alert('Failed to add photo', error.message);
+      return;
+    }
+    setPedalPhotos(prev => [...prev, data as PedalPhoto]);
+    setNewPhotoUrl('');
+  };
+
+  const handleDeletePhoto = async (photo: PedalPhoto) => {
+    const { error } = await supabase.from('pedal_photos').delete().eq('id', photo.id);
+    if (error) {
+      Alert.alert('Failed to delete photo', error.message);
+      return;
+    }
+    setPedalPhotos(prev => prev.filter(p => p.id !== photo.id));
+  };
+
+  const handleMirrorManual = async () => {
+    if (!selectedPedal || !editState.manual_url.trim()) return;
+    setMirroringManual(true);
+    const { data, error } = await invokeEdgeFunction<{ manual_url: string; manual_storage_path: string | null }>(
+      'admin-mirror-manual',
+      { pedal_id: selectedPedal.id, manual_url: editState.manual_url.trim() }
+    );
+    setMirroringManual(false);
+    if (error || !data) {
+      Alert.alert('Mirror failed', 'Could not download and store the manual. Try again.');
+      return;
+    }
+    setEditState(prev => ({ ...prev, manual_url: data.manual_url }));
+    Alert.alert(
+      data.manual_storage_path ? 'Manual stored' : 'Manual link saved',
+      data.manual_storage_path
+        ? 'The PDF was downloaded and stored permanently.'
+        : 'Could not download the PDF — kept the original link instead.'
+    );
   };
 
   // ─── Weekly pick ─────────────────────────────────────────────────────────────
@@ -419,9 +488,46 @@ export default function AdminScreen() {
               {editState.image_url ? (
                 <Image source={{ uri: editState.image_url }} style={styles.preview} resizeMode="contain" />
               ) : null}
+              {editState.manual_url.trim() ? (
+                <TouchableOpacity
+                  style={styles.mirrorBtn}
+                  onPress={handleMirrorManual}
+                  disabled={mirroringManual}
+                  activeOpacity={0.85}
+                >
+                  {mirroringManual
+                    ? <ActivityIndicator color={colors.teal} size="small" />
+                    : <Text style={styles.mirrorBtnText}>Download &amp; Store Manual PDF</Text>}
+                </TouchableOpacity>
+              ) : null}
               <TouchableOpacity style={styles.saveBtn} onPress={handleSaveEdit} activeOpacity={0.85}>
                 <Text style={styles.saveBtnText}>Save Changes</Text>
               </TouchableOpacity>
+
+              <Text style={[styles.sectionLabel, styles.photosLabel]}>Product Photos</Text>
+              {pedalPhotos.map(photo => (
+                <View key={photo.id} style={styles.photoRow}>
+                  <Image source={{ uri: photo.url }} style={styles.photoThumb} resizeMode="cover" />
+                  <Text style={styles.photoUrl} numberOfLines={1}>{photo.url}</Text>
+                  <TouchableOpacity onPress={() => handleDeletePhoto(photo)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <Ionicons name="trash-outline" size={18} color={colors.rose} />
+                  </TouchableOpacity>
+                </View>
+              ))}
+              <View style={styles.searchRow}>
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder="Add photo URL"
+                  placeholderTextColor={colors.textMuted}
+                  value={newPhotoUrl}
+                  onChangeText={setNewPhotoUrl}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                <TouchableOpacity style={styles.searchBtn} onPress={handleAddPhoto} activeOpacity={0.8}>
+                  <Text style={styles.searchBtnText}>Add</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           )}
         </>
@@ -698,7 +804,9 @@ function PedalForm({
       <FormField label="Category *"    value={state.category}    onChangeText={setStr('category')}    placeholder="e.g. Distortion" />
       <FormField label="Subcategory *" value={state.subcategory} onChangeText={setStr('subcategory')} placeholder="e.g. Classic Distortion" />
       <FormField label="Description"   value={state.description} onChangeText={setStr('description')} placeholder="Brief description" multiline />
+      <FormField label="Version"       value={state.version_label} onChangeText={setStr('version_label')} placeholder="e.g. MKII, v3, Firmware 2.1" />
       <FormField label="Image URL"     value={state.image_url}   onChangeText={setStr('image_url')}   placeholder="https://..." noCapitalize />
+      <FormField label="Manual URL"    value={state.manual_url}  onChangeText={setStr('manual_url')}  placeholder="https://... (PDF link)" noCapitalize />
       <View style={pfStyles.switchRow}>
         <Text style={pfStyles.switchLabel}>Analog</Text>
         <Switch
@@ -1003,6 +1111,39 @@ const styles = StyleSheet.create({
     fontSize: typography.sizes.sm,
     fontFamily: typography.bodySemiBold,
     color: '#fff',
+  },
+  mirrorBtn: {
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.teal,
+    paddingVertical: 10,
+    alignItems: 'center',
+    marginTop: spacing.xs,
+  },
+  mirrorBtnText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodySemiBold,
+    color: colors.teal,
+  },
+  photosLabel: {
+    marginTop: spacing.base,
+  },
+  photoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  photoThumb: {
+    width: 40,
+    height: 40,
+    borderRadius: radius.sm,
+    backgroundColor: colors.surface,
+  },
+  photoUrl: {
+    flex: 1,
+    fontSize: typography.sizes.xs,
+    color: colors.textMuted,
   },
   dangerBtn: {
     paddingVertical: 10,

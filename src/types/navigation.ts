@@ -30,5 +30,5 @@ export type BoardsStackParamList = {
 export type AIStackParamList = {
   AIHub: undefined;
   Advisor: { conversationId?: string } | undefined;
-  Finder: { startMode?: 'expert' } | undefined;
+  Finder: { startMode?: 'expert' | 'gasOrPass' | 'surpriseMe' } | undefined;
 };

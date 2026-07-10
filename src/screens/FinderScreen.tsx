@@ -18,7 +18,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, spacing, radius, gradients, categoryColors } from '../theme';
 import { CategoryBadge, ExpertMode, GasOrPassMode } from '../components';
 import { useStore } from '../hooks/useStore';
-import { useRoute, RouteProp } from '@react-navigation/native';
+import { useRoute, RouteProp, useNavigation } from '@react-navigation/native';
 import { supabase, invokeEdgeFunction } from '../lib/supabase';
 import { shareRecommendation } from '../lib/share';
 import { ownedExclusionKeys } from '../lib/pedalNormalization';
@@ -199,15 +199,21 @@ const NO_RESULTS_MSG = 'Reverb did not return any pedals. Try again in a moment.
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function FinderScreen() {
   const insets = useSafeAreaInsets();
-  const route = useRoute<RouteProp<{ Finder: { startMode?: 'expert' } }, 'Finder'>>();
+  const navigation = useNavigation();
+  const route = useRoute<RouteProp<{ Finder: { startMode?: 'expert' | 'gasOrPass' | 'surpriseMe' } }, 'Finder'>>();
+  const startMode = route.params?.startMode;
+  // When navigated directly from AIHub with a startMode, back should return to the hub.
+  const fromHub = Boolean(startMode);
   const { addToWishlist, ownedPedals, wishlistPedals, retiredPedals, profile } = useStore();
   const hasProfile = Boolean(profile?.pedal_expert_profile?.onboarding_completed_at);
   const quizSteps = hasProfile
     ? [Q1_PROFILE, ...QUIZ_STEPS_SHARED]
     : [Q1_DEFAULT, ...QUIZ_STEPS_SHARED];
   const { cardRef: shareCardRef, cardData: shareCardData, triggerShare } = useShareCard();
-  const [mode, setMode] = useState<Mode>(route.params?.startMode === 'expert' ? 'expert' : 'quiz');
-  const [screen, setScreen] = useState<Screen>('idle');
+  const [mode, setMode] = useState<Mode>(
+    startMode === 'expert' ? 'expert' : startMode === 'gasOrPass' ? 'gasOrPass' : 'quiz'
+  );
+  const [screen, setScreen] = useState<Screen>(startMode === 'surpriseMe' ? 'loading' : 'idle');
   const [step, setStep] = useState(0);
   const [answers, setAnswers] = useState<string[]>([]);
   const [result, setResult] = useState<FinderPedal | null>(null);
@@ -418,6 +424,16 @@ export default function FinderScreen() {
     Alert.alert('No suggestions right now', "Your vault covers a lot of ground! Try a different category.");
   };
 
+  // When navigated from AIHub with startMode='surpriseMe', fire once on mount
+  const surpriseFiredRef = useRef(false);
+  useEffect(() => {
+    if (startMode === 'surpriseMe' && !surpriseFiredRef.current) {
+      surpriseFiredRef.current = true;
+      handleSurpriseMe();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleStartQuiz = () => {
     Haptics.selectionAsync();
     setStep(0);
@@ -489,13 +505,13 @@ export default function FinderScreen() {
 
       {/* ── Expert Mode (full-screen) ── */}
       {mode === 'expert' && (
-        <ExpertMode onBack={() => setMode('quiz')} />
+        <ExpertMode onBack={() => fromHub ? navigation.goBack() : setMode('quiz')} />
       )}
 
       {/* ── GAS or Pass mode ── */}
       {mode === 'gasOrPass' && (
         <GasOrPassMode
-          onBack={() => setMode('quiz')}
+          onBack={() => fromHub ? navigation.goBack() : setMode('quiz')}
           ownedPedals={ownedPedals}
           wishlistPedals={wishlistPedals}
           retiredPedals={retiredPedals}

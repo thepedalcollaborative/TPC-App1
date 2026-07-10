@@ -114,11 +114,13 @@ async function searchYouTubeDemo(query: string, ytKey: string): Promise<YTVideo 
 function buildPrompt(
   owned:    Array<{ brand: string; model: string; category: string }>,
   wishlist: Array<{ brand: string; model: string }>,
+  retired:  Array<{ brand: string; model: string }>,
   profile:  { genres?: string[]; tone_identity?: string; playing_style?: string } | null,
   tpcVideos: YTVideo[],
 ): string {
   const ownedList   = owned.slice(0, 20).map(p => `${p.brand} ${p.model} (${p.category})`).join(', ') || 'none yet';
   const wishList    = wishlist.slice(0, 10).map(p => `${p.brand} ${p.model}`).join(', ') || 'none';
+  const retiredList = retired.slice(0, 10).map(p => `${p.brand} ${p.model}`).join(', ') || 'none';
   const genres      = profile?.genres?.join(', ') || 'not specified';
   const tone        = profile?.tone_identity || 'not described';
   const style       = profile?.playing_style || 'not specified';
@@ -134,11 +136,12 @@ function buildPrompt(
 Their current rig:
 - Owned pedals: ${ownedList}
 - Wishlist: ${wishList}
+- Retired/sold pedals (exclude these too): ${retiredList}
 - Genres: ${genres}
 - Tone identity: ${tone}
 - Playing style: ${style}
 ${tpcSection}
-Pick ONE pedal they don't own yet that would most meaningfully expand their sound. Avoid anything already on their wishlist. Be specific — name an exact model.
+Pick ONE pedal they don't own yet that would most meaningfully expand their sound. Avoid anything already on their wishlist or retired list. Be specific — name an exact model.
 
 If you pick a pedal from the TPC video list, include its video_id. Otherwise set tpc_video_id to null.
 
@@ -206,7 +209,7 @@ serve(async (req) => {
     }
 
     // ── Fetch context in parallel ─────────────────────────────────────────────
-    const [ownedResult, wishlistResult, tpcVideos] = await Promise.all([
+    const [ownedResult, wishlistResult, retiredResult, tpcVideos] = await Promise.all([
       admin
         .from('user_pedals')
         .select('pedal:pedals(brand, model, category)')
@@ -219,6 +222,12 @@ serve(async (req) => {
         .eq('user_id', user.id)
         .eq('status', 'wishlist')
         .limit(10),
+      admin
+        .from('user_pedals')
+        .select('pedal:pedals(brand, model)')
+        .eq('user_id', user.id)
+        .eq('status', 'retired')
+        .limit(20),
       ytKey ? fetchTpcVideos(ytKey) : Promise.resolve([]),
     ]);
 
@@ -228,12 +237,15 @@ serve(async (req) => {
     const wishlist = (wishlistResult.data ?? [])
       .map((r: { pedal: { brand: string; model: string } | null }) => r.pedal)
       .filter(Boolean) as Array<{ brand: string; model: string }>;
+    const retired = (retiredResult.data ?? [])
+      .map((r: { pedal: { brand: string; model: string } | null }) => r.pedal)
+      .filter(Boolean) as Array<{ brand: string; model: string }>;
     const expertProfile = profileRow.pedal_expert_profile as {
       genres?: string[]; tone_identity?: string; playing_style?: string
     } | null;
 
     // ── Generate with Claude Haiku ────────────────────────────────────────────
-    const prompt = buildPrompt(owned, wishlist, expertProfile, tpcVideos);
+    const prompt = buildPrompt(owned, wishlist, retired, expertProfile, tpcVideos);
 
     const aiRes = await fetch(ANTHROPIC_API_URL, {
       method: 'POST',

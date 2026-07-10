@@ -1,6 +1,13 @@
 import { createClient } from '@supabase/supabase-js';
 import * as SecureStore from 'expo-secure-store';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
+import { isAffectedIOSVersion } from './iosVersion';
+
+// On iOS 26.0–26.5 expo-secure-store hits the same TurboModule exception-propagation
+// crash that affected react-native-purchases. Fall back to AsyncStorage so no
+// Keychain TurboModule calls happen on launch on affected devices.
+const USE_SECURE_STORE = !isAffectedIOSVersion();
 
 const extra =
   Constants.expoConfig?.extra ??
@@ -18,13 +25,15 @@ if (!supabaseUrl?.startsWith('https://')) {
 
 // Chunking SecureStore adapter — splits values > 2048 bytes across multiple keys
 // to stay within SecureStore's per-item size limit (Keychain/Keystore restriction).
-const CHUNK_SIZE = 1800; // conservative margin below 2048
+// On iOS 26.0–26.5 all SecureStore paths are replaced with AsyncStorage to avoid
+// the TurboModule crash; chunking is not needed there (AsyncStorage has no size cap).
+const CHUNK_SIZE = 1800;
 
 const SecureStorageAdapter = {
   getItem: async (key: string): Promise<string | null> => {
+    if (!USE_SECURE_STORE) return AsyncStorage.getItem(key);
     const first = await SecureStore.getItemAsync(key);
     if (first === null) return null;
-    // Check if this was chunked
     const meta = await SecureStore.getItemAsync(`${key}__chunks`);
     if (!meta) return first;
     const count = parseInt(meta, 10);
@@ -37,6 +46,7 @@ const SecureStorageAdapter = {
   },
 
   setItem: async (key: string, value: string): Promise<void> => {
+    if (!USE_SECURE_STORE) { await AsyncStorage.setItem(key, value); return; }
     if (value.length <= CHUNK_SIZE) {
       await SecureStore.setItemAsync(key, value);
       await SecureStore.deleteItemAsync(`${key}__chunks`);
@@ -54,6 +64,7 @@ const SecureStorageAdapter = {
   },
 
   removeItem: async (key: string): Promise<void> => {
+    if (!USE_SECURE_STORE) { await AsyncStorage.removeItem(key); return; }
     const meta = await SecureStore.getItemAsync(`${key}__chunks`);
     if (meta) {
       const count = parseInt(meta, 10);
