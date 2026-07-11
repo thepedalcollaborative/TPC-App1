@@ -11,6 +11,7 @@
  */
 
 import React, { useEffect, useRef } from 'react';
+import { USE_NATIVE_DRIVER } from '../lib/iosVersion';
 import {
   View,
   Text,
@@ -54,18 +55,18 @@ export function PostOnboardingScreen({ onGetMyPick, onExplore }: PostOnboardingS
     Animated.sequence([
       // Logo pops in
       Animated.parallel([
-        Animated.spring(logoScale,   { toValue: 1, tension: 55, friction: 7, useNativeDriver: true }),
-        Animated.timing(logoOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
+        Animated.spring(logoScale,   { toValue: 1, tension: 55, friction: 7, useNativeDriver: USE_NATIVE_DRIVER }),
+        Animated.timing(logoOpacity, { toValue: 1, duration: 300, useNativeDriver: USE_NATIVE_DRIVER }),
       ]),
       Animated.delay(180),
       // Content slides up
       Animated.parallel([
-        Animated.spring(contentY,  { toValue: 0, tension: 50, friction: 8, useNativeDriver: true }),
-        Animated.timing(contentOp, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.spring(contentY,  { toValue: 0, tension: 50, friction: 8, useNativeDriver: USE_NATIVE_DRIVER }),
+        Animated.timing(contentOp, { toValue: 1, duration: 400, useNativeDriver: USE_NATIVE_DRIVER }),
       ]),
       Animated.delay(200),
       // CTA fades in last
-      Animated.timing(ctaOp, { toValue: 1, duration: 350, useNativeDriver: true }),
+      Animated.timing(ctaOp, { toValue: 1, duration: 350, useNativeDriver: USE_NATIVE_DRIVER }),
     ]).start();
   }, []);
 

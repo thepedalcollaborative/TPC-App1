@@ -1,4 +1,5 @@
 import React, { useState, useRef, useCallback } from 'react';
+import { USE_NATIVE_DRIVER } from '../lib/iosVersion';
 import {
   View,
   Text,
@@ -43,9 +44,9 @@ export function PlayerOnboarding({ onComplete, onDismiss, initialAnswers }: Prop
   const fadeAnim = useRef(new Animated.Value(1)).current;
 
   const animateTransition = useCallback((next: () => void) => {
-    Animated.timing(fadeAnim, { toValue: 0, duration: 150, useNativeDriver: true }).start(() => {
+    Animated.timing(fadeAnim, { toValue: 0, duration: 150, useNativeDriver: USE_NATIVE_DRIVER }).start(() => {
       next();
-      Animated.timing(fadeAnim, { toValue: 1, duration: 200, useNativeDriver: true }).start();
+      Animated.timing(fadeAnim, { toValue: 1, duration: 200, useNativeDriver: USE_NATIVE_DRIVER }).start();
     });
   }, []);
 

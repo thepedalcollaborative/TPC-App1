@@ -11,6 +11,16 @@ import { Platform, NativeModules } from 'react-native';
  * C++ exceptions, and abort the process because there is no C++ catch handler.
  * Apple fixed the underlying behavior in iOS 26.6.
  */
+/**
+ * Native-driver flag for all Animated animations. On iOS 26.0–26.5,
+ * NativeAnimatedModule's async void TurboModule calls throw ObjC exceptions
+ * (see facebook/react-native#54859) — with the RCTTurboModule patch they no
+ * longer crash, but native-driver animations silently never run, leaving
+ * anything animating from opacity 0 permanently invisible. JS-driven
+ * animations avoid the native module entirely.
+ */
+export const USE_NATIVE_DRIVER = !isAffectedIOSVersion();
+
 export function isAffectedIOSVersion(): boolean {
   if (Platform.OS !== 'ios') return false;
   try {

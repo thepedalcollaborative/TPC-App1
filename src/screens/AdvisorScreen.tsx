@@ -1,4 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
+import { USE_NATIVE_DRIVER } from '../lib/iosVersion';
 import {
   View,
   Text,
@@ -156,8 +157,8 @@ export default function AdvisorScreen() {
     if (isThinking) {
       Animated.loop(
         Animated.sequence([
-          Animated.timing(dotAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
-          Animated.timing(dotAnim, { toValue: 0, duration: 600, useNativeDriver: true }),
+          Animated.timing(dotAnim, { toValue: 1, duration: 600, useNativeDriver: USE_NATIVE_DRIVER }),
+          Animated.timing(dotAnim, { toValue: 0, duration: 600, useNativeDriver: USE_NATIVE_DRIVER }),
         ])
       ).start();
     } else {

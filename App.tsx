@@ -22,7 +22,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Linking from 'expo-linking';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { enableScreens } from 'react-native-screens';
-import { isAffectedIOSVersion } from './src/lib/iosVersion';
+import { isAffectedIOSVersion, USE_NATIVE_DRIVER } from './src/lib/iosVersion';
 import { supabase } from './src/lib/supabase';
 import { useStore } from './src/hooks/useStore';
 import {
@@ -121,6 +121,15 @@ function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
   const introFade = useRef(new Animated.Value(1)).current;
   const exitTranslate = useRef(new Animated.Value(0)).current;
   const hasPlayed = useRef(false);
+  const hasFinished = useRef(false);
+
+  // Single-fire wrapper — callable by both the animation callback and the
+  // watchdog timeout without double-invoking onFinish.
+  const finishOnce = React.useCallback(() => {
+    if (hasFinished.current) return;
+    hasFinished.current = true;
+    onFinish();
+  }, [onFinish]);
 
   const spin = useMemo(
     () =>
@@ -143,13 +152,13 @@ function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
           toValue: 0,
           duration: 260,
           easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
+          useNativeDriver: USE_NATIVE_DRIVER,
         }),
         Animated.timing(rowOpacity, {
           toValue: 1,
           duration: 260,
           easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
+          useNativeDriver: USE_NATIVE_DRIVER,
         }),
       ]),
       Animated.parallel([
@@ -157,20 +166,20 @@ function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
           toValue: 1,
           duration: 810,
           easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
+          useNativeDriver: USE_NATIVE_DRIVER,
         }),
         Animated.parallel([
           Animated.timing(textOpacity, {
             toValue: 1,
             duration: 540,
             easing: Easing.out(Easing.cubic),
-            useNativeDriver: true,
+            useNativeDriver: USE_NATIVE_DRIVER,
           }),
           Animated.timing(textTranslate, {
             toValue: 0,
             duration: 648,
             easing: Easing.out(Easing.cubic),
-            useNativeDriver: true,
+            useNativeDriver: USE_NATIVE_DRIVER,
           }),
         ]),
       ]),
@@ -179,14 +188,19 @@ function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
         toValue: -width,
         duration: 396,
         easing: Easing.inOut(Easing.cubic),
-        useNativeDriver: true,
+        useNativeDriver: USE_NATIVE_DRIVER,
       }),
     ]).start(({ finished }) => {
       if (finished) {
-        onFinish();
+        finishOnce();
       }
     });
-  }, [exitTranslate, introFade, onFinish, rotation, rowOpacity, textOpacity, textTranslate, textWidth, width]);
+    // Watchdog: if the animation never completes (e.g. a native-driver stall),
+    // dismiss the splash anyway so the user is never stranded on a white screen.
+    // Total animation runtime is ~2.7s; 5s leaves comfortable margin.
+    const watchdog = setTimeout(finishOnce, 5000);
+    return () => clearTimeout(watchdog);
+  }, [exitTranslate, finishOnce, introFade, rotation, rowOpacity, textOpacity, textTranslate, textWidth, width]);
 
   return (
     <Animated.View style={[styles.splashRoot, { transform: [{ translateX: exitTranslate }] }]}>

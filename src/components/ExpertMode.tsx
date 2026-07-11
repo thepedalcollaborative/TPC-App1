@@ -5,6 +5,7 @@
 // Stage 4: Personalized pedal recommendation with community signals
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { USE_NATIVE_DRIVER } from '../lib/iosVersion';
 import {
   View,
   Text,
@@ -243,9 +244,9 @@ function SpiderChart({ values, animate = true }: { values: SpiderValues; animate
   useEffect(() => {
     if (!animate || hasAnimated.current) return;
     hasAnimated.current = true;
-    Animated.spring(gridScale, { toValue: 1, tension: 40, friction: 8, useNativeDriver: true }).start();
+    Animated.spring(gridScale, { toValue: 1, tension: 40, friction: 8, useNativeDriver: USE_NATIVE_DRIVER }).start();
     setTimeout(() => {
-      Animated.spring(valueScale, { toValue: 1, tension: 60, friction: 6, useNativeDriver: true })
+      Animated.spring(valueScale, { toValue: 1, tension: 60, friction: 6, useNativeDriver: USE_NATIVE_DRIVER })
         .start(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy));
     }, 420);
   }, []);
@@ -386,7 +387,7 @@ export function ExpertMode({ onBack }: Props) {
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const fadeIn = useCallback(() => {
     fadeAnim.setValue(0);
-    Animated.timing(fadeAnim, { toValue: 1, duration: 300, useNativeDriver: true }).start();
+    Animated.timing(fadeAnim, { toValue: 1, duration: 300, useNativeDriver: USE_NATIVE_DRIVER }).start();
   }, [fadeAnim]);
 
   useEffect(() => {
@@ -585,7 +586,7 @@ export function ExpertMode({ onBack }: Props) {
 
     if (interviewStep < interviewQuestions.length - 1) {
       fadeAnim.setValue(0);
-      Animated.timing(fadeAnim, { toValue: 1, duration: 250, useNativeDriver: true }).start();
+      Animated.timing(fadeAnim, { toValue: 1, duration: 250, useNativeDriver: USE_NATIVE_DRIVER }).start();
       setInterviewStep(interviewStep + 1);
     } else {
       // Reveal the spider web — the HUZZAH moment — before generating the pick

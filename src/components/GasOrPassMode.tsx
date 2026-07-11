@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { USE_NATIVE_DRIVER } from '../lib/iosVersion';
 import {
   View,
   Text,
@@ -324,11 +325,11 @@ export default function GasOrPassMode({ onBack, ownedPedals, wishlistPedals, ret
     if (!showTutorial) return;
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(tutorialAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
+        Animated.timing(tutorialAnim, { toValue: 1, duration: 600, useNativeDriver: USE_NATIVE_DRIVER }),
         Animated.delay(200),
-        Animated.timing(tutorialAnim, { toValue: -1, duration: 600, useNativeDriver: true }),
+        Animated.timing(tutorialAnim, { toValue: -1, duration: 600, useNativeDriver: USE_NATIVE_DRIVER }),
         Animated.delay(200),
-        Animated.timing(tutorialAnim, { toValue: 0, duration: 300, useNativeDriver: true }),
+        Animated.timing(tutorialAnim, { toValue: 0, duration: 300, useNativeDriver: USE_NATIVE_DRIVER }),
         Animated.delay(600),
       ]),
     );
@@ -354,7 +355,7 @@ export default function GasOrPassMode({ onBack, ownedPedals, wishlistPedals, ret
       Animated.timing(pan, {
         toValue: { x: toX, y: 0 },
         duration: 230,
-        useNativeDriver: true,
+        useNativeDriver: USE_NATIVE_DRIVER,
       }).start(() => {
         // Read top card from ref — safe to use outside a state updater
         const top = deckRef.current[0];
@@ -369,9 +370,9 @@ export default function GasOrPassMode({ onBack, ownedPedals, wishlistPedals, ret
             setShareNudge(top);
             shareNudgeOpacity.setValue(0);
             Animated.sequence([
-              Animated.timing(shareNudgeOpacity, { toValue: 1, duration: 250, useNativeDriver: true }),
+              Animated.timing(shareNudgeOpacity, { toValue: 1, duration: 250, useNativeDriver: USE_NATIVE_DRIVER }),
               Animated.delay(2800),
-              Animated.timing(shareNudgeOpacity, { toValue: 0, duration: 350, useNativeDriver: true }),
+              Animated.timing(shareNudgeOpacity, { toValue: 0, duration: 350, useNativeDriver: USE_NATIVE_DRIVER }),
             ]).start(() => setShareNudge(null));
           } else {
             setPassCount(c => c + 1);
@@ -402,7 +403,7 @@ export default function GasOrPassMode({ onBack, ownedPedals, wishlistPedals, ret
       onPanResponderGrant: () => {
         Animated.spring(nextCardScale, {
           toValue: 1,
-          useNativeDriver: true,
+          useNativeDriver: USE_NATIVE_DRIVER,
           friction: 8,
         }).start();
       },
@@ -416,8 +417,8 @@ export default function GasOrPassMode({ onBack, ownedPedals, wishlistPedals, ret
           swipeCardRef.current('pass');
         } else {
           Animated.parallel([
-            Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: true, friction: 7 }),
-            Animated.spring(nextCardScale, { toValue: 0.94, useNativeDriver: true, friction: 8 }),
+            Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: USE_NATIVE_DRIVER, friction: 7 }),
+            Animated.spring(nextCardScale, { toValue: 0.94, useNativeDriver: USE_NATIVE_DRIVER, friction: 8 }),
           ]).start();
         }
       },

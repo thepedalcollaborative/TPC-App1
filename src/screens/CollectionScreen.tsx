@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { USE_NATIVE_DRIVER } from '../lib/iosVersion';
 import {
   View,
   Text,
@@ -247,9 +248,9 @@ export default function CollectionScreen() {
   const showShareNudge = useCallback((brand: string, model: string) => {
     if (nudgeDismissRef.current) clearTimeout(nudgeDismissRef.current);
     setShareNudge({ brand, model });
-    Animated.spring(nudgeOpacity, { toValue: 1, tension: 60, friction: 10, useNativeDriver: true }).start();
+    Animated.spring(nudgeOpacity, { toValue: 1, tension: 60, friction: 10, useNativeDriver: USE_NATIVE_DRIVER }).start();
     nudgeDismissRef.current = setTimeout(() => {
-      Animated.timing(nudgeOpacity, { toValue: 0, duration: 400, useNativeDriver: true }).start(() => setShareNudge(null));
+      Animated.timing(nudgeOpacity, { toValue: 0, duration: 400, useNativeDriver: USE_NATIVE_DRIVER }).start(() => setShareNudge(null));
     }, 5000);
   }, [nudgeOpacity]);
   useEffect(() => () => { if (nudgeDismissRef.current) clearTimeout(nudgeDismissRef.current); }, []);
@@ -3153,7 +3154,7 @@ export default function CollectionScreen() {
           <TouchableOpacity
             onPress={() => {
               if (nudgeDismissRef.current) clearTimeout(nudgeDismissRef.current);
-              Animated.timing(nudgeOpacity, { toValue: 0, duration: 250, useNativeDriver: true }).start(() => setShareNudge(null));
+              Animated.timing(nudgeOpacity, { toValue: 0, duration: 250, useNativeDriver: USE_NATIVE_DRIVER }).start(() => setShareNudge(null));
             }}
             hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
           >

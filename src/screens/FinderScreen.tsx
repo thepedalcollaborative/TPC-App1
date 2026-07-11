@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { USE_NATIVE_DRIVER } from '../lib/iosVersion';
 import {
   View,
   Text,
@@ -284,8 +285,8 @@ export default function FinderScreen() {
     fadeAnim.setValue(0);
     slideAnim.setValue(24);
     Animated.parallel([
-      Animated.timing(fadeAnim, { toValue: 1, duration: 300, useNativeDriver: true }),
-      Animated.timing(slideAnim, { toValue: 0, duration: 300, useNativeDriver: true }),
+      Animated.timing(fadeAnim, { toValue: 1, duration: 300, useNativeDriver: USE_NATIVE_DRIVER }),
+      Animated.timing(slideAnim, { toValue: 0, duration: 300, useNativeDriver: USE_NATIVE_DRIVER }),
     ]).start();
   }, [fadeAnim, slideAnim]);
 
@@ -449,7 +450,7 @@ export default function FinderScreen() {
 
     if (step < quizSteps.length - 1) {
       fadeAnim.setValue(0);
-      Animated.timing(fadeAnim, { toValue: 1, duration: 250, useNativeDriver: true }).start();
+      Animated.timing(fadeAnim, { toValue: 1, duration: 250, useNativeDriver: USE_NATIVE_DRIVER }).start();
       setStep(step + 1);
     } else {
       runQuizResult(newAnswers);
