@@ -59,5 +59,18 @@ target 'ThePedalCollaborative' do
       :mac_catalyst_enabled => false,
       :ccache_enabled => ccache_enabled?(podfile_properties),
     )
+
+    # fmt's FMT_COMPILE_STRING consteval checks fail to compile under the
+    # newer clang in Xcode 26.x (needed since building RN from source for the
+    # RCTTurboModule patch). Defining FMT_CONSTEVAL as empty makes those
+    # checks runtime no-ops. Harmless on older clang / EAS images.
+    installer.pods_project.targets.each do |target|
+      if target.name == 'fmt'
+        target.build_configurations.each do |config|
+          config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']
+          config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] << 'FMT_CONSTEVAL='
+        end
+      end
+    end
   end
 end

@@ -29,3 +29,20 @@ index 2a67797..4b976fc 100644
      } @finally {
        [retainedObjectsForInvocation removeAllObjects];
      }
+diff --git a/node_modules/react-native/third-party-podspecs/fmt.podspec b/node_modules/react-native/third-party-podspecs/fmt.podspec
+index 2f38990..666a081 100644
+--- a/node_modules/react-native/third-party-podspecs/fmt.podspec
++++ b/node_modules/react-native/third-party-podspecs/fmt.podspec
+@@ -17,6 +17,12 @@ Pod::Spec.new do |spec|
+     :git => fmt_git_url,
+     :tag => "11.0.2"
+   }
++  # TPC patch: fmt 11.0.2's consteval detection breaks under Xcode 26 clang
++  # ("call to consteval function is not a constant expression" in format-inl.h).
++  # Fixed upstream in fmt 11.1+, but RN pins 11.0.2 and the macro chain has no
++  # #ifndef guards to override externally. Force FMT_USE_CONSTEVAL off at
++  # checkout time — fmt compiles fine without consteval (its pre-C++20 path).
++  spec.prepare_command = 'sed -i.bak "s/#if .defined(__cpp_lib_is_constant_evaluated)/#if 1/" include/fmt/base.h'
+   spec.pod_target_xcconfig = {
+     "CLANG_CXX_LANGUAGE_STANDARD" => rct_cxx_language_standard(),
+     "GCC_WARN_INHIBIT_ALL_WARNINGS" => "YES" # Disable warnings because we don't control this library

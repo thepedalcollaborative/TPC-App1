@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, AppState, Easing, Image, Modal, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Animated, AppState, Dimensions, Easing, Image, Modal, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import Constants from 'expo-constants';
@@ -16,7 +16,11 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createStackNavigator } from '@react-navigation/stack';
 import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import {
+  SafeAreaProvider,
+  SafeAreaInsetsContext,
+  SafeAreaFrameContext,
+} from 'react-native-safe-area-context';
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Linking from 'expo-linking';
@@ -753,11 +757,28 @@ export default function App() {
   // On iOS 26.0–26.5, both GestureHandlerRootView.install() and
   // SafeAreaProvider dispatch void TurboModule methods on background GCD
   // threads, which aborts the process. Skip both on affected versions.
+  // But every screen calls useSafeAreaInsets(), which throws a fatal JS
+  // error without a provider (the build-59/60 white screen). Supply the
+  // library's contexts with JS-computed values instead — no native calls.
   if (AFFECTED_IOS) {
+    const { width, height } = Dimensions.get('window');
+    const statusBarHeight = Constants.statusBarHeight ?? 20;
+    const staticInsets = {
+      top: statusBarHeight,
+      left: 0,
+      right: 0,
+      // Home-indicator devices (no physical button) need bottom clearance;
+      // their status bar is >= 44pt on modern iPhones vs 20pt legacy.
+      bottom: statusBarHeight > 24 ? 34 : 0,
+    };
     return (
-      <View style={{ flex: 1, paddingTop: Constants.statusBarHeight }}>
-        {appInner}
-      </View>
+      <SafeAreaFrameContext.Provider value={{ x: 0, y: 0, width, height }}>
+        <SafeAreaInsetsContext.Provider value={staticInsets}>
+          <View style={{ flex: 1, paddingTop: statusBarHeight }}>
+            {appInner}
+          </View>
+        </SafeAreaInsetsContext.Provider>
+      </SafeAreaFrameContext.Provider>
     );
   }
 
