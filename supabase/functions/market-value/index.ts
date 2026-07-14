@@ -107,7 +107,22 @@ serve(async (req) => {
       }
     }
 
-    const query = `${brand} ${model}`;
+    // Version disambiguation: "TS9" alone mixes vintage originals ($250+)
+    // with reissues ($75). When the catalog entry has a version_label, fold
+    // it into the search + relevance check so eras don't cross-contaminate.
+    let versionLabel = '';
+    try {
+      const { data: pedalRow } = await supabase
+        .from('pedals')
+        .select('version_label')
+        .eq('id', pedal_id)
+        .maybeSingle();
+      versionLabel = pedalRow?.version_label ?? '';
+    } catch {
+      // Catalog lookup is best-effort
+    }
+
+    const query = `${brand} ${model} ${versionLabel}`.trim();
 
     // Always fetch a wide sample — we filter for relevance and use the median,
     // so more data only helps.
@@ -120,17 +135,38 @@ serve(async (req) => {
       return conditionSlugs.some(s => slug === s || slug.startsWith(s));
     };
 
-    // Relevance: every significant token of the model name must appear in the
-    // listing title, or the listing is ignored (kills bundles, parts, boxes,
-    // and adjacent models that a bare text query pulls in).
-    const modelTokens = model
+    // Relevance: every significant token of the model name (and version label,
+    // when present) must appear in the listing title, or the listing is
+    // ignored (kills bundles, parts, boxes, and adjacent models that a bare
+    // text query pulls in).
+    const modelTokens = `${model} ${versionLabel}`
       .toLowerCase()
       .split(/[\s/-]+/)
       .filter(t => t.length > 1);
+
+    // Variant/mod exclusion — a "Blues Driver" search returns BD-2W Waza and
+    // Keeley-modded units at ~2x the stock price (measured: 38% of sold
+    // results). Exclude marker words unless they're part of the model itself.
+    const MOD_MARKERS = [
+      'waza', 'keeley', 'modded', 'modified', 'analogman', 'analog man',
+      'alchemy audio', 'monte allums', 'custom shop',
+    ];
+    const activeMarkers = MOD_MARKERS.filter(
+      m => !model.toLowerCase().includes(m) && !brand.toLowerCase().includes(m)
+    );
+    // Model-number variants: for digit-bearing tokens ("bd-2"), a trailing
+    // letter means a different pedal (bd-2w) — exclude those titles too.
+    const variantPatterns = modelTokens
+      .filter(t => /\d/.test(t))
+      .map(t => new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[a-z]\\b`, 'i'));
+
     const isRelevant = (listing: ReverbListing): boolean => {
       const title = (listing.title ?? '').toLowerCase();
       if (!title) return true; // no title returned — don't discard
-      return modelTokens.every(t => title.includes(t));
+      if (!modelTokens.every(t => title.includes(t))) return false;
+      if (activeMarkers.some(m => title.includes(m))) return false;
+      if (variantPatterns.some(re => re.test(title))) return false;
+      return true;
     };
 
     const extractPrices = (listings: ReverbListing[]): number[] =>
@@ -155,59 +191,33 @@ serve(async (req) => {
     const listingsData = await listingsRes.json();
     const listings = extractPrices((listingsData?.listings ?? []) as ReverbListing[]);
 
-    // ── 2. Sold used listings (last 30 days) ─────────────────────────────────
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3_600_000).toISOString().split('T')[0];
-    const soldRes = await fetch(
-      `https://api.reverb.com/api/listings?` +
-        new URLSearchParams({
-          query,
-          condition: 'used',
-          state: 'sold',
-          sold_listing_at_gte: thirtyDaysAgo,
-          per_page: perPage,
-        }),
-      { headers: REVERB_HEADERS }
-    );
-    const soldData = await soldRes.json();
-    const sold = extractPrices((soldData?.listings ?? []) as ReverbListing[]);
-
-    // ── 3. Reverb Price Guide (their own transaction-based estimate) ─────────
-    let guideValue: number | null = null;
-    try {
-      const guideRes = await fetch(
-        `https://api.reverb.com/api/priceguide?` +
-          new URLSearchParams({ query, per_page: '5' }),
+    // ── 2. Sold used listings ─────────────────────────────────────────────────
+    // Two pages (API caps per_page at 50); results are recent-first, and the
+    // sold_listing_at_gte param is silently ignored on the public API, so
+    // page depth is the real recency control.
+    const soldPages = await Promise.all([1, 2].map(page =>
+      fetch(
+        `https://api.reverb.com/api/listings?` +
+          new URLSearchParams({
+            query,
+            condition: 'used',
+            state: 'sold',
+            per_page: perPage,
+            page: String(page),
+          }),
         { headers: REVERB_HEADERS }
-      );
-      if (guideRes.ok) {
-        const guideData = await guideRes.json();
-        const entries = (guideData?.price_guides ?? []) as Array<{
-          title?: string;
-          estimated_value?: { price_low?: { amount?: string }; price_high?: { amount?: string } };
-          price_low?: { amount?: string };
-          price_high?: { amount?: string };
-        }>;
-        // Take the first entry whose title matches the model
-        const entry = entries.find(e => {
-          const title = (e.title ?? '').toLowerCase();
-          return modelTokens.every(t => title.includes(t));
-        });
-        if (entry) {
-          const low = parseFloat(
-            entry.estimated_value?.price_low?.amount ?? entry.price_low?.amount ?? ''
-          );
-          const high = parseFloat(
-            entry.estimated_value?.price_high?.amount ?? entry.price_high?.amount ?? ''
-          );
-          if (low > 0 && high > 0) guideValue = (low + high) / 2;
-          else if (low > 0) guideValue = low;
-        }
-      }
-    } catch {
-      // Price guide is a bonus signal — never fail the request over it
-    }
+      ).then(r => r.json()).catch(() => null)
+    ));
+    const sold = extractPrices(
+      soldPages.flatMap(p => (p?.listings ?? []) as ReverbListing[])
+    );
 
-    // ── 4. TPC in-app sales (real transactions from our own users) ───────────
+    // NOTE: Reverb's Price Guide endpoint was retired from the public API
+    // (403 "no longer publicly available"), so there is no guide leg — the
+    // deeper two-page sold sample above fills that role.
+    const guideValue: number | null = null;
+
+    // ── 3. TPC in-app sales (real transactions from our own users) ───────────
     // The retire flow already captures retired_price when a pedal is sold.
     let tpcSalesValue: number | null = null;
     let tpcSalesCount = 0;
@@ -235,16 +245,15 @@ serve(async (req) => {
       // Same: bonus signal only
     }
 
-    // ── 5. Confidence-weighted blend ──────────────────────────────────────────
+    // ── 4. Confidence-weighted blend ──────────────────────────────────────────
     // Each source contributes its median weighted by (per-point weight × count,
     // count capped so no single source swamps the rest).
     //   TPC sales    1.5/pt — true transactions with known condition, our data
-    //   Reverb sold  1.0/pt — real transactions
-    //   Price Guide  fixed 10 — Reverb's own aggregate estimate
+    //   Reverb sold  1.0/pt — real transactions (up to 100, 2 pages)
     //   Asking       0.5/pt — asking prices run high
     const medList = medianOf(listings);
     const medSold = medianOf(sold);
-    const CAP = 25;
+    const CAP = 40;
     const sources: Array<{ value: number; weight: number }> = [];
     if (tpcSalesValue !== null) sources.push({ value: tpcSalesValue, weight: 1.5 * Math.min(tpcSalesCount, CAP) });
     if (medSold !== null)       sources.push({ value: medSold, weight: 1.0 * Math.min(sold.length, CAP) });
