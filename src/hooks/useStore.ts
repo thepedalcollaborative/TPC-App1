@@ -538,15 +538,19 @@ export const useStore = create<Store>((set, get) => ({
     // 1. Load whatever is already cached in the DB
     const { data: cached } = await supabase
       .from('pedal_market_data')
-      .select('pedal_id, market_value, updated_at')
+      .select('pedal_id, condition, market_value, updated_at')
       .in('pedal_id', pedalIds);
 
-    const cachedMap = new Map((cached ?? []).map(c => [c.pedal_id, c]));
+    // Rows are keyed by (pedal_id, condition) — index both so each pedal
+    // resolves to the row matching its own condition, not an arbitrary one.
+    const cachedMap = new Map((cached ?? []).map(c => [`${c.pedal_id}|${c.condition}`, c]));
+    const cachedAnyMap = new Map((cached ?? []).map(c => [c.pedal_id, c]));
     const valueMap: Record<string, number> = {};
     const staleIds: string[] = [];
 
     for (const up of allTracked) {
-      const hit = cachedMap.get(up.pedal_id);
+      const hit = cachedMap.get(`${up.pedal_id}|${up.condition ?? 'used'}`)
+        ?? cachedAnyMap.get(up.pedal_id);
       if (hit?.market_value) {
         valueMap[up.pedal_id] = hit.market_value;
         const ageHours = (Date.now() - new Date(hit.updated_at).getTime()) / 3_600_000;

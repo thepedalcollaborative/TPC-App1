@@ -28,6 +28,7 @@ const CONDITION_SLUG_MAP: Record<string, string[]> = {
 type ReverbListing = {
   price?: { amount?: string };
   condition?: { slug?: string };
+  title?: string;
 };
 
 serve(async (req) => {
@@ -99,8 +100,9 @@ serve(async (req) => {
 
     const query = `${brand} ${model}`;
 
-    // Fetch more listings when filtering by condition so we have enough after filtering
-    const perPage = conditionSlugs ? '50' : '20';
+    // Always fetch a wide sample — we filter for relevance and use the median,
+    // so more data only helps.
+    const perPage = '50';
 
     // Filter helper — only applied when the user has set a condition
     const matchesCondition = (listing: ReverbListing): boolean => {
@@ -109,20 +111,35 @@ serve(async (req) => {
       return conditionSlugs.some(s => slug === s || slug.startsWith(s));
     };
 
+    // Relevance: every significant token of the model name must appear in the
+    // listing title, or the listing is ignored (kills bundles, parts, boxes,
+    // and adjacent models that a bare text query pulls in).
+    const modelTokens = model
+      .toLowerCase()
+      .split(/[\s/-]+/)
+      .filter(t => t.length > 1);
+    const isRelevant = (listing: ReverbListing): boolean => {
+      const title = (listing.title ?? '').toLowerCase();
+      if (!title) return true; // no title returned — don't discard
+      return modelTokens.every(t => title.includes(t));
+    };
+
     const extractPrices = (listings: ReverbListing[]): number[] =>
       listings
+        .filter(isRelevant)
         .filter(matchesCondition)
         .map(l => parseFloat(l.price?.amount ?? '0'))
         .filter(p => p > 0);
 
     // ── 1. Current used listings ──────────────────────────────────────────────
+    // NOTE: no price sort — sorting ascending and averaging the first page
+    // meant "average of the 50 cheapest", which biased every value low.
     const listingsRes = await fetch(
       `https://api.reverb.com/api/listings?` +
         new URLSearchParams({
           query,
           condition: 'used',
           per_page: perPage,
-          sort: 'price_asc',
         }),
       { headers: REVERB_HEADERS }
     );
@@ -145,28 +162,35 @@ serve(async (req) => {
     const soldData = await soldRes.json();
     const sold = extractPrices((soldData?.listings ?? []) as ReverbListing[]);
 
-    // ── 3. Compute weighted average ───────────────────────────────────────────
-    const avg = (arr: number[]) =>
-      arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+    // ── 3. Compute market value ───────────────────────────────────────────────
+    // Median instead of mean: a single $1 parts listing or $999 collector
+    // listing no longer moves the number.
+    const median = (arr: number[]): number | null => {
+      if (!arr.length) return null;
+      const s = [...arr].sort((a, b) => a - b);
+      const mid = Math.floor(s.length / 2);
+      return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+    };
 
-    const avgList = avg(listings);
-    const avgSold = avg(sold);
+    const medList = median(listings);
+    const medSold = median(sold);
 
-    // Sold at full weight (1.0), active listings at half weight (0.5)
+    // Sold prices at full weight (what people actually pay), active listings
+    // at half weight (asking prices run high).
     let marketValue: number | null = null;
-    if (avgSold !== null && avgList !== null) {
-      marketValue = (avgSold * 1.0 + avgList * 0.5) / 1.5;
-    } else if (avgSold !== null) {
-      marketValue = avgSold;
-    } else if (avgList !== null) {
-      marketValue = avgList;
+    if (medSold !== null && medList !== null) {
+      marketValue = (medSold * 1.0 + medList * 0.5) / 1.5;
+    } else if (medSold !== null) {
+      marketValue = medSold;
+    } else if (medList !== null) {
+      marketValue = medList;
     }
 
     const row = {
       pedal_id,
       condition: conditionKey,
-      avg_used_list: avgList ? Math.round(avgList) : null,
-      avg_used_sold: avgSold ? Math.round(avgSold) : null,
+      avg_used_list: medList ? Math.round(medList) : null,
+      avg_used_sold: medSold ? Math.round(medSold) : null,
       market_value: marketValue ? Math.round(marketValue) : null,
       sample_count: listings.length + sold.length,
       updated_at: new Date().toISOString(),

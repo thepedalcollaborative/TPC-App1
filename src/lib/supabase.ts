@@ -184,6 +184,7 @@ export type Pedal = {
   is_verified: boolean;
   merged_into: string | null;
   tone_dna: string | null;
+  manual_text: string | null;
   midi_manual_url: string | null;
   quick_start_url: string | null;
   dimensions: string | null;
