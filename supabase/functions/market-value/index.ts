@@ -31,6 +31,15 @@ type ReverbListing = {
   title?: string;
 };
 
+// Median: robust to outliers — a single $1 parts listing or $999 collector
+// listing doesn't move the number.
+const medianOf = (arr: number[]): number | null => {
+  if (!arr.length) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+};
+
 serve(async (req) => {
   const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -162,37 +171,101 @@ serve(async (req) => {
     const soldData = await soldRes.json();
     const sold = extractPrices((soldData?.listings ?? []) as ReverbListing[]);
 
-    // ── 3. Compute market value ───────────────────────────────────────────────
-    // Median instead of mean: a single $1 parts listing or $999 collector
-    // listing no longer moves the number.
-    const median = (arr: number[]): number | null => {
-      if (!arr.length) return null;
-      const s = [...arr].sort((a, b) => a - b);
-      const mid = Math.floor(s.length / 2);
-      return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-    };
-
-    const medList = median(listings);
-    const medSold = median(sold);
-
-    // Sold prices at full weight (what people actually pay), active listings
-    // at half weight (asking prices run high).
-    let marketValue: number | null = null;
-    if (medSold !== null && medList !== null) {
-      marketValue = (medSold * 1.0 + medList * 0.5) / 1.5;
-    } else if (medSold !== null) {
-      marketValue = medSold;
-    } else if (medList !== null) {
-      marketValue = medList;
+    // ── 3. Reverb Price Guide (their own transaction-based estimate) ─────────
+    let guideValue: number | null = null;
+    try {
+      const guideRes = await fetch(
+        `https://api.reverb.com/api/priceguide?` +
+          new URLSearchParams({ query, per_page: '5' }),
+        { headers: REVERB_HEADERS }
+      );
+      if (guideRes.ok) {
+        const guideData = await guideRes.json();
+        const entries = (guideData?.price_guides ?? []) as Array<{
+          title?: string;
+          estimated_value?: { price_low?: { amount?: string }; price_high?: { amount?: string } };
+          price_low?: { amount?: string };
+          price_high?: { amount?: string };
+        }>;
+        // Take the first entry whose title matches the model
+        const entry = entries.find(e => {
+          const title = (e.title ?? '').toLowerCase();
+          return modelTokens.every(t => title.includes(t));
+        });
+        if (entry) {
+          const low = parseFloat(
+            entry.estimated_value?.price_low?.amount ?? entry.price_low?.amount ?? ''
+          );
+          const high = parseFloat(
+            entry.estimated_value?.price_high?.amount ?? entry.price_high?.amount ?? ''
+          );
+          if (low > 0 && high > 0) guideValue = (low + high) / 2;
+          else if (low > 0) guideValue = low;
+        }
+      }
+    } catch {
+      // Price guide is a bonus signal — never fail the request over it
     }
+
+    // ── 4. TPC in-app sales (real transactions from our own users) ───────────
+    // The retire flow already captures retired_price when a pedal is sold.
+    let tpcSalesValue: number | null = null;
+    let tpcSalesCount = 0;
+    try {
+      const { data: sales } = await supabase
+        .from('user_pedals')
+        .select('retired_price, condition')
+        .eq('pedal_id', pedal_id)
+        .eq('status', 'retired')
+        .eq('retired_method', 'sale')
+        .not('retired_price', 'is', null)
+        .gt('retired_price', 0);
+      if (sales && sales.length > 0) {
+        // Prefer sales matching the requested condition when there are enough
+        const rows = sales as Array<{ retired_price: number; condition: string | null }>;
+        const conditionMatched = condition
+          ? rows.filter(s => s.condition === condition)
+          : rows;
+        const usable = conditionMatched.length >= 2 ? conditionMatched : rows;
+        const prices = usable.map(s => s.retired_price);
+        tpcSalesCount = prices.length;
+        tpcSalesValue = medianOf(prices);
+      }
+    } catch {
+      // Same: bonus signal only
+    }
+
+    // ── 5. Confidence-weighted blend ──────────────────────────────────────────
+    // Each source contributes its median weighted by (per-point weight × count,
+    // count capped so no single source swamps the rest).
+    //   TPC sales    1.5/pt — true transactions with known condition, our data
+    //   Reverb sold  1.0/pt — real transactions
+    //   Price Guide  fixed 10 — Reverb's own aggregate estimate
+    //   Asking       0.5/pt — asking prices run high
+    const medList = medianOf(listings);
+    const medSold = medianOf(sold);
+    const CAP = 25;
+    const sources: Array<{ value: number; weight: number }> = [];
+    if (tpcSalesValue !== null) sources.push({ value: tpcSalesValue, weight: 1.5 * Math.min(tpcSalesCount, CAP) });
+    if (medSold !== null)       sources.push({ value: medSold, weight: 1.0 * Math.min(sold.length, CAP) });
+    if (guideValue !== null)    sources.push({ value: guideValue, weight: 10 });
+    if (medList !== null)       sources.push({ value: medList, weight: 0.5 * Math.min(listings.length, CAP) });
+
+    const totalWeight = sources.reduce((s, x) => s + x.weight, 0);
+    const marketValue = totalWeight > 0
+      ? sources.reduce((s, x) => s + x.value * x.weight, 0) / totalWeight
+      : null;
 
     const row = {
       pedal_id,
       condition: conditionKey,
       avg_used_list: medList ? Math.round(medList) : null,
       avg_used_sold: medSold ? Math.round(medSold) : null,
+      guide_value: guideValue ? Math.round(guideValue) : null,
+      tpc_sales_value: tpcSalesValue ? Math.round(tpcSalesValue) : null,
+      tpc_sales_count: tpcSalesCount,
       market_value: marketValue ? Math.round(marketValue) : null,
-      sample_count: listings.length + sold.length,
+      sample_count: listings.length + sold.length + tpcSalesCount,
       updated_at: new Date().toISOString(),
     };
 

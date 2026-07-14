@@ -226,7 +226,7 @@ export default function CollectionScreen() {
   const insets = useSafeAreaInsets();
   const route = useRoute<RouteProp<TabParamList, 'Vault'>>();
   const navigation = useNavigation<NavigationProp<TabParamList>>();
-  const { session, profile, ownedPedals, wishlistPedals, retiredPedals, listedPedals, totalInvested, totalMarketValue, marketValues, fetchPedals, userImageUrls, userImageThumbUrls, refreshUserImages, viewMode, boards, updateListingStatus, wifeMode, openPaywall } = useStore();
+  const { session, profile, ownedPedals, wishlistPedals, retiredPedals, listedPedals, totalInvested, totalMarketValue, marketValues, marketSamples, fetchPedals, userImageUrls, userImageThumbUrls, refreshUserImages, viewMode, boards, updateListingStatus, wifeMode, openPaywall } = useStore();
   const { fmt, fmtDelta } = useFormatMoney();
 
   const [activeTab, setActiveTab] = useState<'owned' | 'wishlist' | 'listed'>('owned');
@@ -1595,7 +1595,13 @@ export default function CollectionScreen() {
                 <>
                   <Text style={styles.valueDot}>•</Text>
                   <View style={styles.valuePair}>
-                    <Text style={styles.valueLabel}>Est. Value</Text>
+                    <Text style={styles.valueLabel}>
+                      {(() => {
+                        // Confidence: total data points behind the owned-pedal values
+                        const pts = ownedPedals.reduce((s, up) => s + (marketSamples[up.pedal_id] ?? 0), 0);
+                        return pts > 0 ? `Est. Value · ${pts} data pts` : 'Est. Value';
+                      })()}
+                    </Text>
                     <Text style={styles.valueAmount}>
                       {fmt(totalMarketValue)}
                     </Text>

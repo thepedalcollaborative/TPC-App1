@@ -64,6 +64,7 @@ type Store = {
   listedPedals: UserPedal[]; // ownedPedals where listing_status IS NOT NULL
   totalInvested: number;
   marketValues: Record<string, number>;  // pedal_id → market_value
+  marketSamples: Record<string, number>; // pedal_id → data points behind the value
   totalMarketValue: number;
   // Number of wishlist items where market price ≤ target/avg (drives Vault tab badge)
   wishlistDropCount: number;
@@ -124,6 +125,7 @@ type WeeklyPickResponse = {
 
 type MarketValueResponse = {
   market_value?: number;
+  sample_count?: number;
 };
 
 type SearchPedalsUpsertResponse = {
@@ -181,6 +183,7 @@ export const useStore = create<Store>((set, get) => ({
         retiredPedals: [],
         totalInvested: 0,
         marketValues: {},
+        marketSamples: {},
         totalMarketValue: 0,
         wishlistDropCount: 0,
         userImageUrls: {},
@@ -430,6 +433,7 @@ export const useStore = create<Store>((set, get) => ({
   listedPedals: [],
   totalInvested: 0,
   marketValues: {},
+  marketSamples: {},
   totalMarketValue: 0,
   wishlistDropCount: 0,
   userImageUrls: {},
@@ -538,7 +542,7 @@ export const useStore = create<Store>((set, get) => ({
     // 1. Load whatever is already cached in the DB
     const { data: cached } = await supabase
       .from('pedal_market_data')
-      .select('pedal_id, condition, market_value, updated_at')
+      .select('pedal_id, condition, market_value, sample_count, updated_at')
       .in('pedal_id', pedalIds);
 
     // Rows are keyed by (pedal_id, condition) — index both so each pedal
@@ -546,6 +550,7 @@ export const useStore = create<Store>((set, get) => ({
     const cachedMap = new Map((cached ?? []).map(c => [`${c.pedal_id}|${c.condition}`, c]));
     const cachedAnyMap = new Map((cached ?? []).map(c => [c.pedal_id, c]));
     const valueMap: Record<string, number> = {};
+    const sampleMap: Record<string, number> = {};
     const staleIds: string[] = [];
 
     for (const up of allTracked) {
@@ -553,6 +558,7 @@ export const useStore = create<Store>((set, get) => ({
         ?? cachedAnyMap.get(up.pedal_id);
       if (hit?.market_value) {
         valueMap[up.pedal_id] = hit.market_value;
+        if (hit.sample_count != null) sampleMap[up.pedal_id] = hit.sample_count;
         const ageHours = (Date.now() - new Date(hit.updated_at).getTime()) / 3_600_000;
         if (ageHours > 24) staleIds.push(up.pedal_id);
       } else {
@@ -575,6 +581,7 @@ export const useStore = create<Store>((set, get) => ({
     const initialTotal = calcOwnedTotal(valueMap);
     set({
       marketValues: { ...valueMap },
+      marketSamples: { ...sampleMap },
       totalMarketValue: initialTotal,
       wishlistDropCount: calcWishlistDrops(valueMap),
     });
@@ -590,11 +597,14 @@ export const useStore = create<Store>((set, get) => ({
           condition: up.condition ?? undefined,
         });
         if (data?.market_value) {
-          const { marketValues: current } = get();
+          const { marketValues: current, marketSamples: currentSamples } = get();
           const updated = { ...current, [up.pedal_id]: data.market_value };
           const newTotal = calcOwnedTotal(updated);
           set({
             marketValues: updated,
+            marketSamples: data.sample_count != null
+              ? { ...currentSamples, [up.pedal_id]: data.sample_count }
+              : currentSamples,
             totalMarketValue: newTotal,
             wishlistDropCount: calcWishlistDrops(updated),
           });
@@ -1044,7 +1054,7 @@ export const useStore = create<Store>((set, get) => ({
     set({
       session: null, profile: null,
       ownedPedals: [], wishlistPedals: [], retiredPedals: [], listedPedals: [],
-      totalInvested: 0, marketValues: {}, totalMarketValue: 0,
+      totalInvested: 0, marketValues: {}, marketSamples: {}, totalMarketValue: 0,
       userImageUrls: {}, userImageThumbUrls: {},
       boards: [], weeklyPick: null, weeklyPickLoading: false,
     });
