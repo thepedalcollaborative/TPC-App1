@@ -226,7 +226,7 @@ export default function CollectionScreen() {
   const insets = useSafeAreaInsets();
   const route = useRoute<RouteProp<TabParamList, 'Vault'>>();
   const navigation = useNavigation<NavigationProp<TabParamList>>();
-  const { session, profile, ownedPedals, wishlistPedals, retiredPedals, listedPedals, totalInvested, totalMarketValue, marketValues, marketSamples, fetchPedals, userImageUrls, userImageThumbUrls, refreshUserImages, viewMode, boards, updateListingStatus, wifeMode, openPaywall } = useStore();
+  const { session, profile, ownedPedals, wishlistPedals, retiredPedals, listedPedals, totalInvested, totalMarketValue, marketValues, marketSamples, fetchPedals, userImageUrls, userImageThumbUrls, refreshUserImages, viewMode, boards, updateListingStatus, wifeMode, openPaywall, wishlistDropCount } = useStore();
   const { fmt, fmtDelta } = useFormatMoney();
 
   const [activeTab, setActiveTab] = useState<'owned' | 'wishlist' | 'listed'>('owned');
@@ -1664,6 +1664,11 @@ export default function CollectionScreen() {
                   <View style={styles.tabInner}>
                     <Ionicons name={icon} size={13} color={colors.textMuted} />
                     <Text style={styles.tabText}>{label}</Text>
+                    {tab === 'wishlist' && wishlistDropCount > 0 && (
+                      <View style={styles.tabAlertDot}>
+                        <Text style={styles.tabAlertDotText}>{wishlistDropCount}</Text>
+                      </View>
+                    )}
                   </View>
                 )}
               </TouchableOpacity>
@@ -1781,6 +1786,18 @@ export default function CollectionScreen() {
           <Text style={styles.shareGasListCount}>({wishlistPedals.length})</Text>
           <Ionicons name="chevron-forward" size={13} color={colors.rose + '80'} style={{ marginLeft: 'auto' }} />
         </TouchableOpacity>
+      )}
+
+      {/* ── Price-drop callout — explains the tab badge ── */}
+      {activeTab === 'wishlist' && wishlistDropCount > 0 && (
+        <View style={styles.priceDropCallout}>
+          <Ionicons name="trending-down-outline" size={15} color={colors.success} />
+          <Text style={styles.priceDropCalloutText}>
+            {wishlistDropCount === 1
+              ? '1 pedal is at or below your target price'
+              : `${wishlistDropCount} pedals are at or below your target price`}
+          </Text>
+        </View>
       )}
 
       {/* ── Share strip — FS/FT tab (opens config pre-filtered to FS/FT only) ── */}
@@ -4682,6 +4699,36 @@ const styles = StyleSheet.create({
     fontSize: typography.sizes.xs,
     fontFamily: typography.bodySemiBold,
     color: '#fff',
+  },
+  tabAlertDot: {
+    backgroundColor: colors.success,
+    borderRadius: radius.full,
+    minWidth: 16,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    alignItems: 'center',
+    marginLeft: 4,
+  },
+  tabAlertDotText: {
+    fontSize: 9,
+    fontFamily: typography.bodySemiBold,
+    color: '#fff',
+  },
+  priceDropCallout: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.success + '15',
+    borderLeftWidth: 3,
+    borderLeftColor: colors.success,
+    paddingHorizontal: spacing.base,
+    paddingVertical: spacing.sm,
+  },
+  priceDropCalloutText: {
+    fontSize: typography.sizes.sm,
+    fontFamily: typography.bodyMedium,
+    color: colors.success,
+    flex: 1,
   },
   // Search
   searchRow: {
