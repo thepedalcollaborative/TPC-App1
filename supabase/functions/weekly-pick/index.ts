@@ -118,9 +118,9 @@ function buildPrompt(
   profile:  { genres?: string[]; tone_identity?: string; playing_style?: string } | null,
   tpcVideos: YTVideo[],
 ): string {
-  const ownedList   = owned.slice(0, 20).map(p => `${p.brand} ${p.model} (${p.category})`).join(', ') || 'none yet';
-  const wishList    = wishlist.slice(0, 10).map(p => `${p.brand} ${p.model}`).join(', ') || 'none';
-  const retiredList = retired.slice(0, 10).map(p => `${p.brand} ${p.model}`).join(', ') || 'none';
+  const ownedList   = owned.slice(0, 20).map(p => `${p.brand} ${p.model} (${p.category})`).join('\n  ') || 'none yet';
+  const wishList    = wishlist.slice(0, 10).map(p => `${p.brand} ${p.model}`).join('\n  ') || 'none';
+  const retiredList = retired.slice(0, 10).map(p => `${p.brand} ${p.model}`).join('\n  ') || 'none';
   const genres      = profile?.genres?.join(', ') || 'not specified';
   const tone        = profile?.tone_identity || 'not described';
   const style       = profile?.playing_style || 'not specified';
@@ -133,15 +133,23 @@ function buildPrompt(
 
   return `You are TPC's Weekly Pick engine. A guitarist needs ONE fresh pedal recommendation this week.
 
-Their current rig:
-- Owned pedals: ${ownedList}
-- Wishlist: ${wishList}
-- Retired/sold pedals (exclude these too): ${retiredList}
+HARD RULE: You MUST NOT recommend any pedal from the following lists. These are absolute exclusions — not suggestions.
+
+DO NOT RECOMMEND (currently owned):
+  ${ownedList}
+
+DO NOT RECOMMEND (already on wishlist):
+  ${wishList}
+
+DO NOT RECOMMEND (previously owned/sold/traded):
+  ${retiredList}
+
+Their profile:
 - Genres: ${genres}
 - Tone identity: ${tone}
 - Playing style: ${style}
 ${tpcSection}
-Pick ONE pedal they don't own yet that would most meaningfully expand their sound. Avoid anything already on their wishlist or retired list. Be specific — name an exact model.
+Pick ONE pedal NOT in any of the lists above that would most meaningfully expand their sound. Be specific — name an exact model.
 
 If you pick a pedal from the TPC video list, include its video_id. Otherwise set tpc_video_id to null.
 
@@ -278,6 +286,17 @@ serve(async (req) => {
     } catch {
       console.error('[weekly-pick] JSON parse failed:', rawText);
       return json({ error: 'Failed to parse AI response' }, 500);
+    }
+
+    // Server-side guard: reject picks that match anything the user already owns,
+    // wishlisted, or previously owned — catches cases where the model ignores the prompt.
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const pickKey = normalize(`${pick.brand}${pick.model}`);
+    const allExcluded = [...owned, ...wishlist, ...retired];
+    const collision = allExcluded.some(p => normalize(`${p.brand}${p.model}`) === pickKey);
+    if (collision) {
+      console.warn('[weekly-pick] Claude returned excluded pedal:', pick.brand, pick.model);
+      return json({ error: 'no_fresh_pick' }, 422);
     }
 
     // ── Resolve video ─────────────────────────────────────────────────────────

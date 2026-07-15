@@ -539,23 +539,27 @@ export const useStore = create<Store>((set, get) => ({
     const allTracked = [...ownedPedals, ...wishlistPedals];
     const pedalIds = [...new Set(allTracked.map(p => p.pedal_id))];
 
-    // 1. Load whatever is already cached in the DB
+    // 1. Load whatever is already cached in the DB — include colorway_id so we
+    //    can match each user_pedal to its specific colorway row if one exists.
     const { data: cached } = await supabase
       .from('pedal_market_data')
-      .select('pedal_id, condition, market_value, sample_count, updated_at')
+      .select('pedal_id, condition, colorway_id, market_value, sample_count, updated_at')
       .in('pedal_id', pedalIds);
 
-    // Rows are keyed by (pedal_id, condition) — index both so each pedal
-    // resolves to the row matching its own condition, not an arbitrary one.
-    const cachedMap = new Map((cached ?? []).map(c => [`${c.pedal_id}|${c.condition}`, c]));
-    const cachedAnyMap = new Map((cached ?? []).map(c => [c.pedal_id, c]));
+    // Key by (pedal_id|condition|colorway_id) for exact match, then fall back
+    // to condition-only, then pedal-only.
+    const cachedExactMap = new Map((cached ?? []).map(c => [`${c.pedal_id}|${c.condition}|${c.colorway_id ?? ''}`, c]));
+    const cachedCondMap  = new Map((cached ?? []).map(c => [`${c.pedal_id}|${c.condition}`, c]));
+    const cachedAnyMap   = new Map((cached ?? []).map(c => [c.pedal_id, c]));
     const valueMap: Record<string, number> = {};
     const sampleMap: Record<string, number> = {};
     const staleIds: string[] = [];
 
     for (const up of allTracked) {
-      const hit = cachedMap.get(`${up.pedal_id}|${up.condition ?? 'used'}`)
-        ?? cachedAnyMap.get(up.pedal_id);
+      const hit =
+        cachedExactMap.get(`${up.pedal_id}|${up.condition ?? 'used'}|${up.colorway_id ?? ''}`) ??
+        cachedCondMap.get(`${up.pedal_id}|${up.condition ?? 'used'}`) ??
+        cachedAnyMap.get(up.pedal_id);
       if (hit?.market_value) {
         valueMap[up.pedal_id] = hit.market_value;
         if (hit.sample_count != null) sampleMap[up.pedal_id] = hit.sample_count;
@@ -591,10 +595,11 @@ export const useStore = create<Store>((set, get) => ({
       if (!up.pedal) continue;
       try {
         const { data } = await invokeEdgeFunction<MarketValueResponse>('market-value', {
-          pedal_id: up.pedal_id,
-          brand: up.pedal.brand,
-          model: up.pedal.model,
-          condition: up.condition ?? undefined,
+          pedal_id:    up.pedal_id,
+          brand:       up.pedal.brand,
+          model:       up.pedal.model,
+          condition:   up.condition ?? undefined,
+          colorway_id: up.colorway_id ?? undefined,
         });
         if (data?.market_value) {
           const { marketValues: current, marketSamples: currentSamples } = get();

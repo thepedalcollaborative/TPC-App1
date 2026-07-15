@@ -70,11 +70,12 @@ serve(async (req) => {
       });
     }
 
-    const { pedal_id, brand, model, condition } = await req.json() as {
+    const { pedal_id, brand, model, condition, colorway_id } = await req.json() as {
       pedal_id: string;
       brand: string;
       model: string;
       condition?: string;
+      colorway_id?: string | null;
     };
 
     if (!pedal_id || !brand || !model) {
@@ -90,13 +91,16 @@ serve(async (req) => {
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-    // Check cache — keyed by (pedal_id, condition)
-    const { data: cached } = await supabase
+    // Check cache — keyed by (pedal_id, condition) with optional colorway
+    const cacheQuery = supabase
       .from('pedal_market_data')
       .select('*')
       .eq('pedal_id', pedal_id)
-      .eq('condition', conditionKey)
-      .maybeSingle();
+      .eq('condition', conditionKey);
+    const { data: cached } = await (colorway_id
+      ? cacheQuery.eq('colorway_id', colorway_id)
+      : cacheQuery.is('colorway_id', null)
+    ).maybeSingle();
 
     if (cached?.updated_at) {
       const ageHours = (Date.now() - new Date(cached.updated_at).getTime()) / 3_600_000;
@@ -107,22 +111,37 @@ serve(async (req) => {
       }
     }
 
-    // Version disambiguation: "TS9" alone mixes vintage originals ($250+)
-    // with reissues ($75). When the catalog entry has a version_label, fold
-    // it into the search + relevance check so eras don't cross-contaminate.
+    // Pull catalog metadata: version_label for era disambiguation, avg_price as
+    // last-resort fallback, and is_verified so we know how much to trust colorway names.
     let versionLabel = '';
+    let catalogAvgPrice: number | null = null;
     try {
       const { data: pedalRow } = await supabase
         .from('pedals')
-        .select('version_label')
+        .select('version_label, avg_price, is_verified')
         .eq('id', pedal_id)
         .maybeSingle();
       versionLabel = pedalRow?.version_label ?? '';
+      catalogAvgPrice = pedalRow?.avg_price ?? null;
     } catch {
       // Catalog lookup is best-effort
     }
 
-    const query = `${brand} ${model} ${versionLabel}`.trim();
+    // Resolve colorway name for search targeting.
+    let colorwayName = '';
+    if (colorway_id) {
+      try {
+        const { data: cw } = await supabase
+          .from('pedal_colorways')
+          .select('name, is_default')
+          .eq('id', colorway_id)
+          .maybeSingle();
+        // Only use the colorway name if it's not the default (i.e., it's a real variant)
+        if (cw && !cw.is_default && cw.name) colorwayName = cw.name;
+      } catch { /* best-effort */ }
+    }
+
+    const query = `${brand} ${model} ${versionLabel} ${colorwayName}`.trim();
 
     // Always fetch a wide sample — we filter for relevance and use the median,
     // so more data only helps.
@@ -139,7 +158,7 @@ serve(async (req) => {
     // when present) must appear in the listing title, or the listing is
     // ignored (kills bundles, parts, boxes, and adjacent models that a bare
     // text query pulls in).
-    const modelTokens = `${model} ${versionLabel}`
+    const modelTokens = `${model} ${versionLabel} ${colorwayName}`
       .toLowerCase()
       .split(/[\s/-]+/)
       .filter(t => t.length > 1);
@@ -231,7 +250,6 @@ serve(async (req) => {
         .not('retired_price', 'is', null)
         .gt('retired_price', 0);
       if (sales && sales.length > 0) {
-        // Prefer sales matching the requested condition when there are enough
         const rows = sales as Array<{ retired_price: number; condition: string | null }>;
         const conditionMatched = condition
           ? rows.filter(s => s.condition === condition)
@@ -241,46 +259,89 @@ serve(async (req) => {
         tpcSalesCount = prices.length;
         tpcSalesValue = medianOf(prices);
       }
-    } catch {
-      // Same: bonus signal only
-    }
+    } catch { /* bonus signal only */ }
 
-    // ── 4. Confidence-weighted blend ──────────────────────────────────────────
-    // Each source contributes its median weighted by (per-point weight × count,
-    // count capped so no single source swamps the rest).
-    //   TPC sales    1.5/pt — true transactions with known condition, our data
-    //   Reverb sold  1.0/pt — real transactions (up to 100, 2 pages)
-    //   Asking       0.5/pt — asking prices run high
+    // ── 4. User purchase prices (what TPC users actually paid) ───────────────
+    // Noisier than sold prices (condition unknown, mix of new/used) but real
+    // money that changed hands — useful signal for pedals with thin Reverb data.
+    // Capped at 3 years to avoid pricing off stale market conditions.
+    let purchaseValue: number | null = null;
+    let purchaseCount = 0;
+    try {
+      const cutoff = new Date();
+      cutoff.setFullYear(cutoff.getFullYear() - 3);
+      const { data: purchases } = await supabase
+        .from('user_pedals')
+        .select('purchase_price, condition, acquired_date')
+        .eq('pedal_id', pedal_id)
+        .eq('acquired_method', 'purchase')
+        .not('purchase_price', 'is', null)
+        .gt('purchase_price', 0)
+        .gte('acquired_date', cutoff.toISOString().split('T')[0]);
+      if (purchases && purchases.length > 0) {
+        const rows = purchases as Array<{ purchase_price: number; condition: string | null }>;
+        const conditionMatched = condition
+          ? rows.filter(p => p.condition === condition)
+          : rows;
+        const usable = conditionMatched.length >= 2 ? conditionMatched : rows;
+        const prices = usable.map(p => p.purchase_price);
+        purchaseCount = prices.length;
+        purchaseValue = medianOf(prices);
+      }
+    } catch { /* bonus signal only */ }
+
+    // ── 5. Confidence-weighted blend ──────────────────────────────────────────
+    //   TPC sales     1.5/pt — confirmed sell transactions, our data
+    //   Reverb sold   1.0/pt — real transactions (up to 100, 2 pages)
+    //   Purchase price 0.7/pt — real buy-side transactions, condition unknown
+    //   Asking         0.5/pt — asking prices run high
+    //   avg_price      flat fallback — catalog estimate, used only when no live data
     const medList = medianOf(listings);
     const medSold = medianOf(sold);
     const CAP = 40;
     const sources: Array<{ value: number; weight: number }> = [];
-    if (tpcSalesValue !== null) sources.push({ value: tpcSalesValue, weight: 1.5 * Math.min(tpcSalesCount, CAP) });
-    if (medSold !== null)       sources.push({ value: medSold, weight: 1.0 * Math.min(sold.length, CAP) });
-    if (guideValue !== null)    sources.push({ value: guideValue, weight: 10 });
-    if (medList !== null)       sources.push({ value: medList, weight: 0.5 * Math.min(listings.length, CAP) });
+    if (tpcSalesValue !== null)  sources.push({ value: tpcSalesValue,  weight: 1.5 * Math.min(tpcSalesCount, CAP) });
+    if (medSold !== null)        sources.push({ value: medSold,        weight: 1.0 * Math.min(sold.length, CAP) });
+    if (purchaseValue !== null)  sources.push({ value: purchaseValue,  weight: 0.7 * Math.min(purchaseCount, CAP) });
+    if (guideValue !== null)     sources.push({ value: guideValue,     weight: 10 });
+    if (medList !== null)        sources.push({ value: medList,        weight: 0.5 * Math.min(listings.length, CAP) });
 
     const totalWeight = sources.reduce((s, x) => s + x.weight, 0);
     const marketValue = totalWeight > 0
       ? sources.reduce((s, x) => s + x.value * x.weight, 0) / totalWeight
-      : null;
+      : catalogAvgPrice ?? null; // last resort: use catalog avg_price
 
     const row = {
       pedal_id,
       condition: conditionKey,
-      avg_used_list: medList ? Math.round(medList) : null,
-      avg_used_sold: medSold ? Math.round(medSold) : null,
-      guide_value: guideValue ? Math.round(guideValue) : null,
+      colorway_id: colorway_id ?? null,
+      avg_used_list:   medList       ? Math.round(medList)       : null,
+      avg_used_sold:   medSold       ? Math.round(medSold)       : null,
+      guide_value:     guideValue    ? Math.round(guideValue)    : null,
       tpc_sales_value: tpcSalesValue ? Math.round(tpcSalesValue) : null,
       tpc_sales_count: tpcSalesCount,
-      market_value: marketValue ? Math.round(marketValue) : null,
-      sample_count: listings.length + sold.length + tpcSalesCount,
-      updated_at: new Date().toISOString(),
+      market_value:    marketValue   ? Math.round(marketValue)   : null,
+      sample_count:    listings.length + sold.length + tpcSalesCount + purchaseCount,
+      updated_at:      new Date().toISOString(),
     };
 
-    await supabase
+    // Use manual select+update/insert because the unique constraint is a partial
+    // index (nullable colorway_id) which Supabase's onConflict doesn't support directly.
+    const existingQuery = supabase
       .from('pedal_market_data')
-      .upsert(row, { onConflict: 'pedal_id,condition' });
+      .select('id')
+      .eq('pedal_id', pedal_id)
+      .eq('condition', conditionKey);
+    const { data: existingRow } = await (colorway_id
+      ? existingQuery.eq('colorway_id', colorway_id)
+      : existingQuery.is('colorway_id', null)
+    ).maybeSingle();
+
+    if (existingRow?.id) {
+      await supabase.from('pedal_market_data').update(row).eq('id', existingRow.id);
+    } else {
+      await supabase.from('pedal_market_data').insert(row);
+    }
 
     return new Response(JSON.stringify(row), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
