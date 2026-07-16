@@ -9,8 +9,8 @@ import {
   Modal,
   ActivityIndicator,
   Alert,
+  Linking,
 } from 'react-native';
-import { WebView } from 'react-native-webview';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -937,30 +937,29 @@ export default function HomeScreen() {
                 )}
               </View>
 
-              {/* Embedded video — loaded via an HTML wrapper with baseUrl so the
-                  request carries a valid referer; YouTube rejects referer-less
-                  embeds with player error 153. */}
+              {/* Video thumbnail — opens in the YouTube app on tap. In-app embeds
+                  were unreliable (YouTube player error 153 on referer-less loads). */}
               {weeklyPick.videoId && (
-                <View style={styles.weeklyVideoWrapper}>
-                  <WebView
-                    style={styles.weeklyVideo}
-                    originWhitelist={['*']}
-                    source={{
-                      baseUrl: 'https://www.thepedalcollaborative.com',
-                      html: `<!DOCTYPE html><html><head>
-                        <meta name="viewport" content="width=device-width, initial-scale=1">
-                        <style>html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden}
-                        iframe{position:absolute;inset:0;width:100%;height:100%;border:0}</style>
-                        </head><body>
-                        <iframe src="https://www.youtube.com/embed/${weeklyPick.videoId}?playsinline=1&rel=0&modestbranding=1"
-                          allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
-                        </body></html>`,
-                    }}
-                    allowsInlineMediaPlayback
-                    mediaPlaybackRequiresUserAction={false}
-                    scrollEnabled={false}
+                <TouchableOpacity
+                  style={styles.weeklyVideoWrapper}
+                  activeOpacity={0.85}
+                  onPress={() => {
+                    Haptics.selectionAsync();
+                    Linking.openURL(`https://www.youtube.com/watch?v=${weeklyPick.videoId}`).catch(() => {});
+                  }}
+                >
+                  <Image
+                    source={{ uri: `https://img.youtube.com/vi/${weeklyPick.videoId}/hqdefault.jpg` }}
+                    style={styles.weeklyVideoThumb}
+                    resizeMode="cover"
                   />
-                </View>
+                  <View style={styles.weeklyVideoPlayOverlay}>
+                    <View style={styles.weeklyVideoPlayBtn}>
+                      <Ionicons name="play" size={26} color="#fff" style={{ marginLeft: 3 }} />
+                    </View>
+                    <Text style={styles.weeklyVideoWatchText}>Watch on YouTube</Text>
+                  </View>
+                </TouchableOpacity>
               )}
 
               {/* Why */}
@@ -1835,8 +1834,28 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
     marginBottom: spacing.md,
   },
-  weeklyVideo: {
-    flex: 1,
+  weeklyVideoThumb: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  weeklyVideoPlayOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+  },
+  weeklyVideoPlayBtn: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: 'rgba(204,0,0,0.92)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  weeklyVideoWatchText: {
+    fontSize: typography.sizes.xs,
+    fontFamily: typography.bodySemiBold,
+    color: '#fff',
   },
   weeklyModalBtnWishlist: {
     flex: 1,
