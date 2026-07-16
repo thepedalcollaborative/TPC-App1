@@ -600,7 +600,8 @@ export function ExpertMode({ onBack }: Props) {
     answers: { question: string; answer: string }[],
     spider: SpiderValues,
     rejectionReason?: string,
-    excludedPicks?: { brand: string; model: string }[]
+    excludedPicks?: { brand: string; model: string }[],
+    retryDepth = 0,
   ) => {
     if (!profile) return;
 
@@ -721,6 +722,24 @@ ${signal ? `${signal}\n` : ''}${exclusionBlock}${rejectionBlock}Find the ideal n
       if (!raw) throw new Error('empty response from tpc-advisor');
       const clean = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       const parsed = JSON.parse(clean) as Recommendation;
+
+      // Guard: the prompt forbids picks the player owns/wishlisted/retired, but the
+      // model can still slip — verify and silently regenerate once with the bad pick
+      // excluded before surfacing anything.
+      const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const pickKey = normalize(`${parsed.brand}${parsed.model}`);
+      const alreadyTracked = [...ownedPedals, ...wishlistPedals, ...retiredPedals].some(
+        up => up.pedal && normalize(`${up.pedal.brand}${up.pedal.model}`) === pickKey
+      );
+      if (alreadyTracked) {
+        if (retryDepth >= 1) throw new Error('duplicate pick after retry');
+        return generateRecommendation(
+          answers, spider, rejectionReason,
+          [...(excludedPicks ?? []), { brand: parsed.brand, model: parsed.model }],
+          retryDepth + 1,
+        );
+      }
+
       setRecommendation(parsed);
       setWishlistState('idle');
       setFeedbackState('idle');

@@ -66,6 +66,9 @@ type Store = {
   marketValues: Record<string, number>;  // pedal_id → market_value
   marketSamples: Record<string, number>; // pedal_id → data points behind the value
   totalMarketValue: number;
+  // True once a full market refresh pass has completed — totalMarketValue is
+  // still climbing while false. Gate anything that snapshots the value on this.
+  marketValuesSettled: boolean;
   // Number of wishlist items where market price ≤ target/avg (drives Vault tab badge)
   wishlistDropCount: number;
   userImageUrls: Record<string, string>; // user_pedal_id -> signed full url
@@ -435,6 +438,7 @@ export const useStore = create<Store>((set, get) => ({
   marketValues: {},
   marketSamples: {},
   totalMarketValue: 0,
+  marketValuesSettled: false,
   wishlistDropCount: 0,
   userImageUrls: {},
   userImageThumbUrls: {},
@@ -532,6 +536,7 @@ export const useStore = create<Store>((set, get) => ({
   fetchMarketValues: async () => {
     if (marketValuesRefreshInFlight) return;
     marketValuesRefreshInFlight = true;
+    set({ marketValuesSettled: false });
     try {
     const { session, ownedPedals, wishlistPedals } = get();
     if (!session?.user || (ownedPedals.length === 0 && wishlistPedals.length === 0)) return;
@@ -626,6 +631,7 @@ export const useStore = create<Store>((set, get) => ({
     }
     } finally {
       marketValuesRefreshInFlight = false;
+      set({ marketValuesSettled: true });
     }
   },
 

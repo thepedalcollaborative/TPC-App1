@@ -337,7 +337,7 @@ export default function App() {
   const {
     session, setSession, refreshUserImages, profile, fetchProfile,
     paywallVisible, paywallReason, closePaywall,
-    ownedPedals, wishlistPedals, totalMarketValue,
+    ownedPedals, wishlistPedals, totalMarketValue, marketValuesSettled,
   } = useStore();
   const [initialized, setInitialized] = useState(false);
   const [showAnimatedSplash, setShowAnimatedSplash] = useState(true);
@@ -539,11 +539,15 @@ export default function App() {
   }, []);
 
   // Keep the weekly vault digest content in sync with live collection/value.
+  // Wait for marketValuesSettled — during a refresh totalMarketValue climbs
+  // incrementally, and baking a mid-refresh partial total into the notification
+  // meant the push could say $38k while the vault header showed $48k.
   useEffect(() => {
     if (AFFECTED_IOS) return;
     if (!session?.user?.id) return;
+    if (!marketValuesSettled) return;
     scheduleVaultDigestNotification(ownedPedals.length, totalMarketValue).catch(() => {});
-  }, [session?.user?.id, ownedPedals.length, totalMarketValue]);
+  }, [session?.user?.id, ownedPedals.length, totalMarketValue, marketValuesSettled]);
 
   // Cancel notifications on sign-out
   useEffect(() => {
