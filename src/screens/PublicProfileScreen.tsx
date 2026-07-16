@@ -26,10 +26,8 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { colors, typography, spacing, radius, categoryColors } from '../theme';
-import { supabase } from '../lib/supabase';
+import { supabase, publicProfileUrl } from '../lib/supabase';
 import type { RootStackParamList } from '../types/navigation';
-
-const SUPABASE_FUNCTIONS_URL = 'https://skejiotfywhmnvsivfsk.supabase.co/functions/v1';
 
 interface PublicProfile {
   display_name:  string | null;
@@ -73,9 +71,10 @@ export default function PublicProfileScreen() {
 
   const handleShare = async () => {
     Haptics.selectionAsync();
+    const url = publicProfileUrl(username);
     await Share.share({
-      message: `Check out ${profile?.display_name ?? '@' + username}'s vault on The Pedal Collaborative — ${SUPABASE_FUNCTIONS_URL}/public-profile?u=${username}`,
-      url:     `${SUPABASE_FUNCTIONS_URL}/public-profile?u=${username}`,
+      message: `Check out ${profile?.display_name ?? '@' + username}'s vault on The Pedal Collaborative — ${url}`,
+      url,
     });
   };
 

@@ -117,6 +117,13 @@ export async function getEdgeAuthHeaders(): Promise<Record<string, string>> {
   return header;
 }
 
+// Public profile share URL. Currently served by the public-profile edge function;
+// when app.thepedalcollaborative.com goes live, change this one function and every
+// share flow in the app follows.
+export function publicProfileUrl(username: string): string {
+  return `${supabaseUrl}/functions/v1/public-profile?u=${encodeURIComponent(username)}`;
+}
+
 export function invokeEdgeFunction<T = unknown>(
   name: string,
   body: Record<string, unknown>

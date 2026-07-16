@@ -26,7 +26,7 @@ import type { RootStackParamList } from '../types/navigation';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, spacing, radius, gradients } from '../theme';
 import { useStore } from '../hooks/useStore';
-import { supabase, FullExpertProfile } from '../lib/supabase';
+import { supabase, FullExpertProfile, publicProfileUrl } from '../lib/supabase';
 import { ToneProfileEditor } from '../components';
 import { StatCard, TPCLogoMark } from '../components';
 import { hasBetaFullAccess } from '../lib/subscription';
@@ -97,8 +97,6 @@ export default function ProfileScreen() {
       .eq('id', session.user.id);
   };
 
-  const FUNCTIONS_URL = 'https://skejiotfywhmnvsivfsk.supabase.co/functions/v1';
-
   const handlePublicProfileToggle = async (value: boolean) => {
     Haptics.selectionAsync();
     setIsPublicProfile(value);
@@ -112,7 +110,7 @@ export default function ProfileScreen() {
   const handleShareProfile = async () => {
     if (!profile?.username) return;
     Haptics.selectionAsync();
-    const url  = `${FUNCTIONS_URL}/public-profile?u=${profile.username}`;
+    const url  = publicProfileUrl(profile.username);
     const name = profile.display_name ?? `@${profile.username}`;
     await Share.share({
       message: `Check out ${name}'s gear vault on The Pedal Collaborative — ${url}`,
@@ -895,7 +893,7 @@ export default function ProfileScreen() {
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.settingsRowText, { color: colors.teal }]}>Share My Profile</Text>
                   <Text style={styles.settingsRowSub} numberOfLines={1}>
-                    tpc.app/u/{profile.username}
+                    Send anyone a link to your public vault
                   </Text>
                 </View>
                 <Ionicons name="chevron-forward" size={16} color={colors.teal} />
