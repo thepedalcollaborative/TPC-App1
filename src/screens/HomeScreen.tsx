@@ -937,12 +937,25 @@ export default function HomeScreen() {
                 )}
               </View>
 
-              {/* Embedded video */}
+              {/* Embedded video — loaded via an HTML wrapper with baseUrl so the
+                  request carries a valid referer; YouTube rejects referer-less
+                  embeds with player error 153. */}
               {weeklyPick.videoId && (
                 <View style={styles.weeklyVideoWrapper}>
                   <WebView
                     style={styles.weeklyVideo}
-                    source={{ uri: `https://www.youtube.com/embed/${weeklyPick.videoId}?playsinline=1&rel=0&modestbranding=1` }}
+                    originWhitelist={['*']}
+                    source={{
+                      baseUrl: 'https://www.thepedalcollaborative.com',
+                      html: `<!DOCTYPE html><html><head>
+                        <meta name="viewport" content="width=device-width, initial-scale=1">
+                        <style>html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden}
+                        iframe{position:absolute;inset:0;width:100%;height:100%;border:0}</style>
+                        </head><body>
+                        <iframe src="https://www.youtube.com/embed/${weeklyPick.videoId}?playsinline=1&rel=0&modestbranding=1"
+                          allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+                        </body></html>`,
+                    }}
                     allowsInlineMediaPlayback
                     mediaPlaybackRequiresUserAction={false}
                     scrollEnabled={false}
