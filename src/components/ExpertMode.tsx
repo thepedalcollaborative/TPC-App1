@@ -718,10 +718,21 @@ ${signal ? `${signal}\n` : ''}${exclusionBlock}${rejectionBlock}Find the ideal n
 
       if (fnErr) throw new Error(`edge fn: ${JSON.stringify(fnErr)}`);
 
-      const raw = data?.content?.find(c => c.type === 'text')?.text ?? '';
+      // With web search enabled the content array can hold several text blocks —
+      // preamble ("I'll research…"), then the JSON after the search results.
+      // Taking only the first block grabbed the preamble and crashed JSON.parse,
+      // which surfaced as "Something went wrong" whenever the model searched.
+      const raw = (data?.content ?? [])
+        .filter(c => c.type === 'text' && c.text)
+        .map(c => c.text)
+        .join('\n');
       if (!raw) throw new Error('empty response from tpc-advisor');
       const clean = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      const parsed = JSON.parse(clean) as Recommendation;
+      // Extract the outermost JSON object — tolerate prose before/after it
+      const start = clean.indexOf('{');
+      const end = clean.lastIndexOf('}');
+      if (start === -1 || end <= start) throw new Error('no JSON object in response');
+      const parsed = JSON.parse(clean.slice(start, end + 1)) as Recommendation;
 
       // Guard: the prompt forbids picks the player owns/wishlisted/retired, but the
       // model can still slip — verify and silently regenerate once with the bad pick
@@ -764,7 +775,8 @@ ${signal ? `${signal}\n` : ''}${exclusionBlock}${rejectionBlock}Find the ideal n
           assistantMessage: `Recommended the ${parsed.brand} ${parsed.model}. Why: ${parsed.why}`,
         }).catch(() => {});
       }
-    } catch {
+    } catch (e) {
+      if (__DEV__) console.warn('[CustomShop] generateRecommendation failed:', (e as Error).message);
       Alert.alert('Something went wrong', 'Could not generate a recommendation. Tap "Try Again" to retry.');
       setStage('interview');
     }

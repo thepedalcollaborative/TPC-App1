@@ -54,10 +54,15 @@ type ChatMessage = Message & {
 const TEAL_GRADIENT: [string, string] = [colors.teal, colors.tealDark];
 const SURFACE_GRADIENT: [string, string] = ['#FFFFFF', '#F7F4F0'];
 
-/** Extract text from a message content that may be a string or a ContentBlock array */
+/** Extract text from a message content that may be a string or a ContentBlock array.
+ *  Joins ALL text blocks — with web search the model returns preamble + answer as
+ *  separate blocks, and taking only the first silently dropped the answer. */
 const getMessageText = (content: string | ContentBlock[]): string =>
   typeof content === 'string' ? content :
-  (content as ContentBlock[]).find(b => b.type === 'text')?.text ?? '';
+  (content as ContentBlock[])
+    .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text' && Boolean((b as { text?: string }).text))
+    .map(b => b.text)
+    .join('\n\n');
 
 export default function AdvisorScreen() {
   const insets = useSafeAreaInsets();
@@ -286,8 +291,7 @@ export default function AdvisorScreen() {
       const isLatest = i === allHistory.length - 1;
       // Strip image blocks from older messages (keep only text) to limit payload size
       if (!isLatest && Array.isArray(m.content)) {
-        const text = (m.content as ContentBlock[]).find(b => b.type === 'text')?.text ?? '';
-        return { role: m.role, content: text };
+        return { role: m.role, content: getMessageText(m.content) };
       }
       return { role: m.role, content: m.content };
     });
