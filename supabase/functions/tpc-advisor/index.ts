@@ -324,7 +324,7 @@ serve(async (req) => {
           .limit(40),
         adminClient
           .from('user_pedals')
-          .select('pedals(category)')
+          .select('pedal_id, pedals(category)')
           .eq('user_id', user.id)
           .in('status', ['owned', 'wishlist'])
           .limit(100),
@@ -346,33 +346,59 @@ serve(async (req) => {
         recentPedalsFeed = `\n\nRECENTLY ACTIVE ON REVERB (last 60 days — use this for current awareness):\n${lines}`;
       }
 
-      // 2. TPC catalog — prefer user's categories, fall back to all recent imports
+      // 2. TPC catalog — the user's own pedals FIRST (guaranteed, never crowded
+      // out of the window), then other catalog pedals in their categories.
+      // Previously a flat 60-pedal window could omit a pedal the user owns —
+      // the advisor then had no manual_text for the exact pedal being asked about.
       const rawCats = (userPedalsRes.data ?? [])
         .map((row: { pedals: { category: string } | null }) => row.pedals?.category)
         .filter(Boolean) as string[];
       const userCategories = [...new Set(rawCats)];
+      const userPedalIds = [...new Set(
+        (userPedalsRes.data ?? [])
+          .map((row: { pedal_id: string | null }) => row.pedal_id)
+          .filter(Boolean) as string[]
+      )];
 
-      const catalogQuery = adminClient
+      const CATALOG_COLUMNS = [
+        'id', 'brand', 'model', 'category', 'subcategory', 'version_label',
+        'tone_dna', 'manual_text', 'price_usd', 'in_production', 'analog',
+        'true_bypass', 'midi', 'midi_notes', 'presets', 'preset_count',
+        'power_requirements', 'mono_stereo', 'dimensions',
+        'manual_url', 'midi_manual_url', 'quick_start_url',
+        'is_verified',
+      ].join(', ');
+
+      const fillQuery = adminClient
         .from('pedals')
-        .select([
-          'brand', 'model', 'category', 'subcategory', 'version_label',
-          'tone_dna', 'manual_text', 'price_usd', 'in_production', 'analog',
-          'true_bypass', 'midi', 'midi_notes', 'presets', 'preset_count',
-          'power_requirements', 'mono_stereo', 'dimensions',
-          'manual_url', 'midi_manual_url', 'quick_start_url',
-          'is_verified',
-        ].join(', '))
+        .select(CATALOG_COLUMNS)
         .is('merged_into', null)
         .order('is_verified', { ascending: false })
         .order('imported_at', { ascending: false, nullsFirst: false })
         .limit(60);
       if (userCategories.length > 0) {
-        catalogQuery.in('category', userCategories);
+        fillQuery.in('category', userCategories);
       }
-      const { data: catalogPedals } = await catalogQuery;
+
+      const [ownedCatalogRes, fillCatalogRes] = await Promise.all([
+        userPedalIds.length > 0
+          ? adminClient.from('pedals').select(CATALOG_COLUMNS).in('id', userPedalIds)
+          : Promise.resolve({ data: [] }),
+        fillQuery,
+      ]);
+
+      const ownedRows = ownedCatalogRes.data ?? [];
+      const ownedIdSet = new Set(ownedRows.map((p: { id: string }) => p.id));
+      const fillRows = (fillCatalogRes.data ?? [])
+        .filter((p: { id: string }) => !ownedIdSet.has(p.id))
+        .slice(0, Math.max(0, 60 - ownedRows.length));
+      const catalogPedals = [...ownedRows, ...fillRows];
+      // Owned pedals get fuller manual notes — questions are usually about them
+      const ownedManualCap = 2000;
 
       if (catalogPedals && catalogPedals.length > 0) {
         const lines = catalogPedals.map((p: {
+          id: string;
           brand: string; model: string; category: string | null;
           subcategory: string | null; version_label: string | null;
           tone_dna: string | null; manual_text: string | null; price_usd: number | null;
@@ -387,6 +413,7 @@ serve(async (req) => {
           const cat = [p.category, p.subcategory].filter(Boolean).join('/');
           const version = p.version_label ? ` ${p.version_label}` : '';
           const verified = p.is_verified ? ' [TPC VERIFIED]' : '';
+          const owned = ownedIdSet.has(p.id) ? " [IN USER'S VAULT]" : '';
           const price = p.price_usd ? ` $${p.price_usd}` : '';
           const flags = [
             p.analog === true ? 'analog' : p.analog === false ? 'digital' : null,
@@ -400,14 +427,15 @@ serve(async (req) => {
           const power = p.power_requirements ? ` | Power: ${p.power_requirements}` : '';
           const dims = p.dimensions ? ` | Size: ${p.dimensions}` : '';
           const dna = p.tone_dna ? `\n  Sound: ${p.tone_dna}` : '';
-          const manualSnippet = p.manual_text ? `\n  Manual notes: ${p.manual_text.slice(0, 800)}${p.manual_text.length > 800 ? '…' : ''}` : '';
+          const manualCap = ownedIdSet.has(p.id) ? ownedManualCap : 800;
+          const manualSnippet = p.manual_text ? `\n  Manual notes: ${p.manual_text.slice(0, manualCap)}${p.manual_text.length > manualCap ? '…' : ''}` : '';
           const docs = [
             p.manual_url ? `manual: ${p.manual_url}` : null,
             p.midi_manual_url ? `MIDI manual: ${p.midi_manual_url}` : null,
             p.quick_start_url ? `quick start: ${p.quick_start_url}` : null,
           ].filter(Boolean).join(', ');
           const docsStr = docs ? `\n  Docs: ${docs}` : '';
-          return `• ${p.brand} ${p.model}${version}${verified} [${cat}]${price}${flagStr}${power}${dims}${dna}${manualSnippet}${docsStr}`;
+          return `• ${p.brand} ${p.model}${version}${verified}${owned} [${cat}]${price}${flagStr}${power}${dims}${dna}${manualSnippet}${docsStr}`;
         }).join('\n');
         tpcCatalogBlock = `\n\nTPC PEDAL CATALOG (verified entries are TPC admin-confirmed; use manual URLs with fetch_url when a user asks about MIDI, specs, or setup for a specific pedal):\n${lines}`;
       }

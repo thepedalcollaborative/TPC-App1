@@ -521,6 +521,7 @@ export default function AdvisorScreen() {
         ]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
       >
         {isEmpty ? (
           <EmptyState
