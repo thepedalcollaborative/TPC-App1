@@ -400,7 +400,8 @@ serve(async (req) => {
       // names a specific pedal, that pedal's COMPLETE manual_text goes in as
       // the authoritative source (a 2000-char snippet of a 60k-char manual
       // cannot answer "what do the toggles do"). Capped at 2 pedals per turn.
-      const FULL_MANUAL_CAP = 50000;
+      // 80k covers every verified manual except TimeLine MX (138k, truncated)
+      const FULL_MANUAL_CAP = 80000;
       const lastUserMsg = [...(messages ?? [])].reverse().find(
         (m: { role: string }) => m.role === 'user'
       );
