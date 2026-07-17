@@ -396,6 +396,32 @@ serve(async (req) => {
       // Owned pedals get fuller manual notes — questions are usually about them
       const ownedManualCap = 2000;
 
+      // Question-aware full-manual injection: when the latest user message
+      // names a specific pedal, that pedal's COMPLETE manual_text goes in as
+      // the authoritative source (a 2000-char snippet of a 60k-char manual
+      // cannot answer "what do the toggles do"). Capped at 2 pedals per turn.
+      const FULL_MANUAL_CAP = 50000;
+      const lastUserMsg = [...(messages ?? [])].reverse().find(
+        (m: { role: string }) => m.role === 'user'
+      );
+      const lastUserText = (typeof lastUserMsg?.content === 'string'
+        ? lastUserMsg.content
+        : (lastUserMsg?.content ?? [])
+            .filter((b: { type: string }) => b.type === 'text')
+            .map((b: { text?: string }) => b.text ?? '')
+            .join(' ')
+      ).toLowerCase();
+      const fullManualIds = new Set<string>();
+      if (lastUserText) {
+        for (const p of catalogPedals as Array<{ id: string; model: string; manual_text: string | null }>) {
+          if (fullManualIds.size >= 2) break;
+          if (!p.manual_text || p.manual_text.length <= ownedManualCap) continue;
+          if (p.model.length > 2 && lastUserText.includes(p.model.toLowerCase())) {
+            fullManualIds.add(p.id);
+          }
+        }
+      }
+
       if (catalogPedals && catalogPedals.length > 0) {
         const lines = catalogPedals.map((p: {
           id: string;
@@ -427,8 +453,13 @@ serve(async (req) => {
           const power = p.power_requirements ? ` | Power: ${p.power_requirements}` : '';
           const dims = p.dimensions ? ` | Size: ${p.dimensions}` : '';
           const dna = p.tone_dna ? `\n  Sound: ${p.tone_dna}` : '';
-          const manualCap = ownedIdSet.has(p.id) ? ownedManualCap : 800;
-          const manualSnippet = p.manual_text ? `\n  Manual notes: ${p.manual_text.slice(0, manualCap)}${p.manual_text.length > manualCap ? '…' : ''}` : '';
+          const manualCap = fullManualIds.has(p.id)
+            ? FULL_MANUAL_CAP
+            : ownedIdSet.has(p.id) ? ownedManualCap : 800;
+          const manualLabel = fullManualIds.has(p.id)
+            ? 'FULL MANUAL (authoritative — the user is asking about this pedal; answer controls/specs/setup questions strictly from this text)'
+            : 'Manual notes';
+          const manualSnippet = p.manual_text ? `\n  ${manualLabel}: ${p.manual_text.slice(0, manualCap)}${p.manual_text.length > manualCap ? '…' : ''}` : '';
           const docs = [
             p.manual_url ? `manual: ${p.manual_url}` : null,
             p.midi_manual_url ? `MIDI manual: ${p.midi_manual_url}` : null,
@@ -437,7 +468,11 @@ serve(async (req) => {
           const docsStr = docs ? `\n  Docs: ${docs}` : '';
           return `• ${p.brand} ${p.model}${version}${verified}${owned} [${cat}]${price}${flagStr}${power}${dims}${dna}${manualSnippet}${docsStr}`;
         }).join('\n');
-        tpcCatalogBlock = `\n\nTPC PEDAL CATALOG (verified entries are TPC admin-confirmed; use manual URLs with fetch_url when a user asks about MIDI, specs, or setup for a specific pedal):\n${lines}`;
+        tpcCatalogBlock = `\n\nTPC PEDAL CATALOG (verified entries are TPC admin-confirmed). Rules for pedal-specific questions:
+- When a FULL MANUAL is present for the pedal being asked about, it is the authoritative source — quote controls, toggles, modes, and settings from it precisely.
+- NEVER invent controls, specs, or behaviors. If the manual text provided doesn't cover the question, say plainly that the manual details aren't loaded for that topic rather than guessing.
+- manual_url links to a PDF you cannot read — offer it to the user as a link, do not attempt to fetch it.
+${lines}`;
       }
 
       // 3. Community signals — minimum threshold before surfacing any signal
