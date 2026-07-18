@@ -313,6 +313,7 @@ serve(async (req) => {
     let recentPedalsFeed = '';
     let tpcCatalogBlock = '';
     let tpcCommunityBlock = '';
+    let focusedManualsBlock = '';
 
     try {
       const [recentPedalsRes, userPedalsRes, userCountRes] = await Promise.all([
@@ -396,30 +397,66 @@ serve(async (req) => {
       // Owned pedals get fuller manual notes — questions are usually about them
       const ownedManualCap = 2000;
 
-      // Question-aware full-manual injection: when the latest user message
-      // names a specific pedal, that pedal's COMPLETE manual_text goes in as
-      // the authoritative source (a 2000-char snippet of a 60k-char manual
-      // cannot answer "what do the toggles do"). Capped at 2 pedals per turn.
+      // Question-aware full-manual injection: when the CONVERSATION names a
+      // specific pedal, its COMPLETE manual_text goes in as the authoritative
+      // source (a 2000-char snippet of a 60k-char manual cannot answer "what
+      // do the toggles do"). Scans the last 6 messages — not just the latest —
+      // so follow-ups like "and what does the left footswitch hold do?" keep
+      // the manual loaded. Capped at 2 pedals; most recently mentioned win.
       // 80k covers every verified manual except TimeLine MX (138k, truncated)
       const FULL_MANUAL_CAP = 80000;
-      const lastUserMsg = [...(messages ?? [])].reverse().find(
-        (m: { role: string }) => m.role === 'user'
-      );
-      const lastUserText = (typeof lastUserMsg?.content === 'string'
-        ? lastUserMsg.content
-        : (lastUserMsg?.content ?? [])
-            .filter((b: { type: string }) => b.type === 'text')
-            .map((b: { text?: string }) => b.text ?? '')
-            .join(' ')
-      ).toLowerCase();
-      const fullManualIds = new Set<string>();
-      if (lastUserText) {
-        for (const p of catalogPedals as Array<{ id: string; model: string; manual_text: string | null }>) {
-          if (fullManualIds.size >= 2) break;
-          if (!p.manual_text || p.manual_text.length <= ownedManualCap) continue;
-          if (p.model.length > 2 && lastUserText.includes(p.model.toLowerCase())) {
-            fullManualIds.add(p.id);
+      const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+      // Known nicknames that normalization alone can't bridge
+      const ALIASES: Record<string, string[]> = {
+        'Lost + Found': ['lost and found'],
+        'MOOD MKII': ['mood'],
+        'Generation Loss MKII': ['generation loss', 'gen loss'],
+        'Ottobit Jr.': ['ottobit junior'],
+        'Reverse Mode C': ['mode c'],
+        'Mercury7 Reverb': ['mercury 7', 'mercury seven'],
+        'TimeLine MX': ['timeline'],
+      };
+      // Model tokens too generic to trigger on alone ("clean tone", "bad habit")
+      const GENERIC_TOKENS = new Set([
+        'clean', 'habit', 'onward', 'parting', 'sunlight', 'bathing', 'stereo',
+        'delay', 'reverb', 'echo', 'collector', 'texture', 'engine', 'infinite',
+        'dream', 'sequence', 'brothers', 'fountain', 'setback', 'liminal',
+        'console', 'reverse', 'generation', 'jets',
+      ]);
+
+      const recentTexts: string[] = [];
+      for (const m of [...(messages ?? [])].reverse().slice(0, 6)) {
+        const t = typeof m.content === 'string'
+          ? m.content
+          : (m.content ?? [])
+              .filter((b: { type: string }) => b.type === 'text')
+              .map((b: { text?: string }) => b.text ?? '')
+              .join(' ');
+        if (t) recentTexts.push(normalize(t));
+      }
+
+      const matchKeys = (p: { id: string; brand: string; model: string }): string[] => {
+        const keys = [normalize(p.model), normalize(`${p.brand} ${p.model}`)];
+        for (const a of ALIASES[p.model] ?? []) keys.push(normalize(a));
+        // Distinctive single tokens — only for pedals the user tracks, where
+        // loose vocabulary ("my blooper") is how people actually talk
+        if (ownedIdSet.has(p.id)) {
+          for (const tok of p.model.toLowerCase().split(/[\s/+.-]+/)) {
+            if (tok.length >= 5 && !GENERIC_TOKENS.has(tok)) keys.push(normalize(tok));
           }
+        }
+        return keys.filter(k => k.length >= 3);
+      };
+
+      const fullManualIds = new Set<string>();
+      for (const msgText of recentTexts) {
+        if (fullManualIds.size >= 2) break;
+        for (const p of catalogPedals as Array<{ id: string; brand: string; model: string; manual_text: string | null }>) {
+          if (fullManualIds.size >= 2) break;
+          if (fullManualIds.has(p.id)) continue;
+          if (!p.manual_text || p.manual_text.length <= ownedManualCap) continue;
+          if (matchKeys(p).some(k => msgText.includes(k))) fullManualIds.add(p.id);
         }
       }
 
@@ -454,13 +491,10 @@ serve(async (req) => {
           const power = p.power_requirements ? ` | Power: ${p.power_requirements}` : '';
           const dims = p.dimensions ? ` | Size: ${p.dimensions}` : '';
           const dna = p.tone_dna ? `\n  Sound: ${p.tone_dna}` : '';
-          const manualCap = fullManualIds.has(p.id)
-            ? FULL_MANUAL_CAP
-            : ownedIdSet.has(p.id) ? ownedManualCap : 800;
-          const manualLabel = fullManualIds.has(p.id)
-            ? 'FULL MANUAL (authoritative — the user is asking about this pedal; answer controls/specs/setup questions strictly from this text)'
-            : 'Manual notes';
-          const manualSnippet = p.manual_text ? `\n  ${manualLabel}: ${p.manual_text.slice(0, manualCap)}${p.manual_text.length > manualCap ? '…' : ''}` : '';
+          // Snippets only here — full manuals go in a separate uncached block
+          // so this catalog block stays byte-stable and prompt-cacheable.
+          const manualCap = ownedIdSet.has(p.id) ? ownedManualCap : 800;
+          const manualSnippet = p.manual_text ? `\n  Manual notes: ${p.manual_text.slice(0, manualCap)}${p.manual_text.length > manualCap ? '…' : ''}` : '';
           const docs = [
             p.manual_url ? `manual: ${p.manual_url}` : null,
             p.midi_manual_url ? `MIDI manual: ${p.midi_manual_url}` : null,
@@ -470,10 +504,23 @@ serve(async (req) => {
           return `• ${p.brand} ${p.model}${version}${verified}${owned} [${cat}]${price}${flagStr}${power}${dims}${dna}${manualSnippet}${docsStr}`;
         }).join('\n');
         tpcCatalogBlock = `\n\nTPC PEDAL CATALOG (verified entries are TPC admin-confirmed). Rules for pedal-specific questions:
-- When a FULL MANUAL is present for the pedal being asked about, it is the authoritative source — quote controls, toggles, modes, and settings from it precisely.
-- NEVER invent controls, specs, or behaviors. If the manual text provided doesn't cover the question, say plainly that the manual details aren't loaded for that topic rather than guessing.
+- When a FULL MANUAL block is present later in this prompt for the pedal being asked about, it is the authoritative source — quote controls, toggles, modes, and settings from it precisely.
+- NEVER invent controls, specs, or behaviors. If the loaded manual text doesn't cover the question, say plainly that the manual details aren't loaded for that topic rather than guessing.
 - manual_url links to a PDF you cannot read — offer it to the user as a link, do not attempt to fetch it.
 ${lines}`;
+      }
+
+      // Full manuals for pedals the conversation is focused on — kept OUT of
+      // the catalog block so that block stays byte-stable and prompt-cacheable.
+      if (fullManualIds.size > 0) {
+        const sections = (catalogPedals as Array<{ id: string; brand: string; model: string; manual_text: string | null }>)
+          .filter(p => fullManualIds.has(p.id))
+          .map(p => {
+            const text = (p.manual_text ?? '').slice(0, FULL_MANUAL_CAP);
+            const truncated = (p.manual_text ?? '').length > FULL_MANUAL_CAP ? '\n[manual truncated]' : '';
+            return `\n\n=== FULL MANUAL: ${p.brand} ${p.model} ===\n(authoritative — the conversation concerns this pedal; answer controls/toggles/settings/MIDI questions strictly from this text)\n${text}${truncated}`;
+          });
+        focusedManualsBlock = sections.join('');
       }
 
       // 3. Community signals — minimum threshold before surfacing any signal
@@ -529,14 +576,19 @@ ${lines}`;
     // Don't stream when tools are present — full body needed for tool responses
     const shouldStream = stream && !hasTools;
 
-    // Wrap system prompt in a caching block. Static context is cached;
-    // all dynamic blocks (Reverb feed, TPC catalog, community signals) are
-    // appended after the cache boundary so they're always fresh.
-    const dynamicSuffix = recentPedalsFeed + tpcCatalogBlock + tpcCommunityBlock;
+    // Prompt caching, two breakpoints:
+    //   1. Client system prompt (static gear knowledge + vault) — cached.
+    //   2. Session-stable dynamic context (Reverb feed, catalog, community) —
+    //      also cached; it only changes when the DB does, so consecutive
+    //      messages in a session hit the cache instead of re-billing 50-100KB.
+    //   3. Focused full manuals — varies per question, appended UNCACHED after
+    //      both boundaries so it never invalidates them.
+    const stableSuffix = recentPedalsFeed + tpcCatalogBlock + tpcCommunityBlock;
     const systemBlock = systemPrompt
       ? [
           { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
-          ...(dynamicSuffix ? [{ type: 'text', text: dynamicSuffix }] : []),
+          ...(stableSuffix ? [{ type: 'text', text: stableSuffix, cache_control: { type: 'ephemeral' } }] : []),
+          ...(focusedManualsBlock ? [{ type: 'text', text: focusedManualsBlock }] : []),
         ]
       : undefined;
 
