@@ -30,6 +30,20 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 
+// Built-in gte-small embedder (384 dims) for manual-chunk retrieval.
+// deno-lint-ignore no-explicit-any
+declare const Supabase: any;
+let _embedder: { run: (t: string, o: Record<string, boolean>) => Promise<Iterable<number>> } | null = null;
+async function embedQuery(text: string): Promise<number[] | null> {
+  try {
+    _embedder ??= new Supabase.ai.Session('gte-small');
+    const out = await _embedder.run(text, { mean_pool: true, normalize: true });
+    return Array.from(out);
+  } catch {
+    return null; // retrieval is an enhancement — callers fall back
+  }
+}
+
 // Rate limiting is handled via the persistent check_rate_limit() RPC in Postgres.
 // This survives cold starts and concurrent invocations unlike an in-memory Map.
 
@@ -510,17 +524,59 @@ serve(async (req) => {
 ${lines}`;
       }
 
-      // Full manuals for pedals the conversation is focused on — kept OUT of
-      // the catalog block so that block stays byte-stable and prompt-cacheable.
+      // Manual knowledge for the focused pedals — RAG first (top chunks per
+      // pedal, ~7x cheaper than whole manuals and immune to length caps),
+      // whole-manual injection as fallback when chunks are missing or the
+      // embedder is unavailable. Kept OUT of the catalog block so that block
+      // stays byte-stable and prompt-cacheable.
+      const lastUserQuery = [...(messages ?? [])]
+        .filter((m: { role: string }) => m.role === 'user')
+        .slice(-2)
+        .map((m: { content: unknown }) => typeof m.content === 'string'
+          ? m.content
+          : ((m.content ?? []) as Array<{ type: string; text?: string }>)
+              .filter(b => b.type === 'text').map(b => b.text ?? '').join(' '))
+        .join('\n');
+
+      const queryEmbedding = lastUserQuery ? await embedQuery(lastUserQuery) : null;
+
       if (fullManualIds.size > 0) {
-        const sections = (catalogPedals as Array<{ id: string; brand: string; model: string; manual_text: string | null }>)
-          .filter(p => fullManualIds.has(p.id))
-          .map(p => {
-            const text = (p.manual_text ?? '').slice(0, FULL_MANUAL_CAP);
-            const truncated = (p.manual_text ?? '').length > FULL_MANUAL_CAP ? '\n[manual truncated]' : '';
-            return `\n\n=== FULL MANUAL: ${p.brand} ${p.model} ===\n(authoritative — the conversation concerns this pedal; answer controls/toggles/settings/MIDI questions strictly from this text)\n${text}${truncated}`;
+        let retrieved: Array<{ pedal_id: string; content: string; similarity: number }> = [];
+        if (queryEmbedding) {
+          const { data: chunks } = await adminClient.rpc('match_manual_chunks', {
+            query_embedding: queryEmbedding,
+            match_count: 10 * fullManualIds.size,
+            filter_pedal_ids: [...fullManualIds],
           });
-        focusedManualsBlock = sections.join('');
+          retrieved = chunks ?? [];
+        }
+        const coveredIds = new Set(retrieved.map(c => c.pedal_id));
+        const parts: string[] = [];
+        if (retrieved.length > 0) {
+          parts.push(`\n\n=== MANUAL EXCERPTS (authoritative — the conversation concerns these pedals; answer controls/toggles/settings/MIDI questions strictly from these excerpts, and say so if they don't cover the question) ===\n`);
+          parts.push(retrieved.map(c => c.content).join('\n\n---\n\n'));
+        }
+        // Whole-manual fallback for focused pedals with no embedded chunks
+        for (const p of (catalogPedals as Array<{ id: string; brand: string; model: string; manual_text: string | null }>)) {
+          if (!fullManualIds.has(p.id) || coveredIds.has(p.id)) continue;
+          const text = (p.manual_text ?? '').slice(0, FULL_MANUAL_CAP);
+          const truncated = (p.manual_text ?? '').length > FULL_MANUAL_CAP ? '\n[manual truncated]' : '';
+          parts.push(`\n\n=== FULL MANUAL: ${p.brand} ${p.model} ===\n(authoritative — answer strictly from this text)\n${text}${truncated}`);
+        }
+        focusedManualsBlock = parts.join('');
+      } else if (queryEmbedding && userPedalIds.length > 0) {
+        // No pedal named — surface high-confidence excerpts from the user's own
+        // gear so questions like "which of my pedals can self-oscillate?" land.
+        const { data: chunks } = await adminClient.rpc('match_manual_chunks', {
+          query_embedding: queryEmbedding,
+          match_count: 5,
+          filter_pedal_ids: userPedalIds,
+        });
+        const strong = (chunks ?? []).filter((c: { similarity: number }) => c.similarity >= 0.82);
+        if (strong.length > 0) {
+          focusedManualsBlock = `\n\n=== POSSIBLY RELEVANT MANUAL EXCERPTS (from the user's own pedals; use only if actually relevant to the question) ===\n` +
+            strong.map((c: { content: string }) => c.content).join('\n\n---\n\n');
+        }
       }
 
       // 3. Community signals — minimum threshold before surfacing any signal
