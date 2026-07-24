@@ -22,7 +22,7 @@ import { useStore } from '../hooks/useStore';
 import { useRoute, RouteProp, useNavigation } from '@react-navigation/native';
 import { supabase, invokeEdgeFunction } from '../lib/supabase';
 import { shareRecommendation } from '../lib/share';
-import { ownedExclusionKeys } from '../lib/pedalNormalization';
+import { ownedExclusionKeys, isExcluded } from '../lib/pedalNormalization';
 import { HiddenShareCard } from '../components/ShareCard';
 import { useShareCard } from '../lib/useShareCard';
 
@@ -144,7 +144,8 @@ function findBestMatch(
   excluded: Set<string>,
   candidates: FinderPedal[]
 ): FinderPedal {
-  const eligible = candidates.filter(p => !excluded.has(`${p.brand.toLowerCase()}|${p.model.toLowerCase()}`));
+  const eligible = candidates.filter(p =>
+    !(p.pedal_id && excluded.has(`id:${p.pedal_id}`)) && !isExcluded(p.brand, p.model, excluded));
   const pool = eligible.length > 0 ? eligible : candidates;
   const scored = pool.map(p => ({
     pedal: p,
@@ -316,7 +317,8 @@ export default function FinderScreen() {
 
   const pickRandomFromQuery = useCallback(async (query: string) => {
     const results = await fetchReverbCandidates(query);
-    const filtered = results.filter(p => !excluded.has(`${p.brand.toLowerCase()}|${p.model.toLowerCase()}`));
+    const filtered = results.filter(p =>
+      !(p.pedal_id && excluded.has(`id:${p.pedal_id}`)) && !isExcluded(p.brand, p.model, excluded));
     return filtered;
   }, [excluded, fetchReverbCandidates]);
 
@@ -371,8 +373,8 @@ export default function FinderScreen() {
       try {
         const query = CATEGORY_QUERY[category] ?? `${category} pedal`;
         const candidates = await fetchReverbCandidates(query);
-        const available = candidates.filter(
-          p => !excluded.has(`${p.brand.toLowerCase()}|${p.model.toLowerCase()}`),
+        const available = candidates.filter(p =>
+          !(p.pedal_id && excluded.has(`id:${p.pedal_id}`)) && !isExcluded(p.brand, p.model, excluded),
         );
         if (available.length > 0) {
           // Prefer candidates with photos but don't require them
@@ -399,7 +401,7 @@ export default function FinderScreen() {
 
       if (localPedals && localPedals.length > 0) {
         const available = localPedals.filter(p =>
-          !excluded.has(`${p.brand.toLowerCase()}|${p.model.toLowerCase()}`),
+          !excluded.has(`id:${p.id}`) && !isExcluded(p.brand, p.model, excluded),
         );
         if (available.length > 0) {
           const random = available[Math.floor(Math.random() * available.length)];

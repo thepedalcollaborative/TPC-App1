@@ -507,6 +507,13 @@ export const useStore = create<Store>((set, get) => ({
 
     if (error) {
       if (__DEV__) console.warn('[Store] fetchPedals error:', error.message);
+      // Auth errors mean the token was mid-refresh when the query ran.
+      // Retry once after the SDK has had time to settle the new token.
+      if (error.message?.toLowerCase().includes('jwt') ||
+          error.message?.toLowerCase().includes('unauthorized') ||
+          error.message?.toLowerCase().includes('auth')) {
+        setTimeout(() => { void get().fetchPedals(); }, 2000);
+      }
       return;
     }
     if (data) {
