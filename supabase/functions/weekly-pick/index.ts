@@ -192,50 +192,23 @@ serve(async (req) => {
       return json({ error: 'pro_required' }, 403);
     }
 
-    // ── Cache check ───────────────────────────────────────────────────────────
-    const weekKey = getWeekKey();
-    const { data: cached } = await admin
-      .from('weekly_picks')
-      .select('*')
-      .eq('user_id', user.id)
-      .eq('week_key', weekKey)
-      .maybeSingle();
-
-    if (cached) {
-      return json({
-        brand:       cached.brand,
-        model:       cached.model,
-        why:         cached.why,
-        category:    cached.category,
-        weekKey:     cached.week_key,
-        generatedAt: cached.generated_at,
-        videoId:     cached.video_id ?? null,
-        videoTitle:  cached.video_title ?? null,
-        isTpcVideo:  cached.is_tpc_video ?? false,
-        fromCache:   true,
-      });
-    }
-
-    // ── Fetch context in parallel ─────────────────────────────────────────────
+    // ── Fetch context (needed for cache validation too) ───────────────────────
     const [ownedResult, wishlistResult, retiredResult, tpcVideos] = await Promise.all([
       admin
         .from('user_pedals')
         .select('pedal:pedals(brand, model, category)')
         .eq('user_id', user.id)
-        .eq('status', 'owned')
-        .limit(20),
+        .eq('status', 'owned'),
       admin
         .from('user_pedals')
         .select('pedal:pedals(brand, model)')
         .eq('user_id', user.id)
-        .eq('status', 'wishlist')
-        .limit(10),
+        .eq('status', 'wishlist'),
       admin
         .from('user_pedals')
         .select('pedal:pedals(brand, model)')
         .eq('user_id', user.id)
-        .eq('status', 'retired')
-        .limit(20),
+        .eq('status', 'retired'),
       ytKey ? fetchTpcVideos(ytKey) : Promise.resolve([]),
     ]);
 
@@ -248,6 +221,40 @@ serve(async (req) => {
     const retired = (retiredResult.data ?? [])
       .map((r: { pedal: { brand: string; model: string } | null }) => r.pedal)
       .filter(Boolean) as Array<{ brand: string; model: string }>;
+
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const allExcluded = [...owned, ...wishlist, ...retired];
+
+    // ── Cache check (re-validate against current ownership) ───────────────────
+    const weekKey = getWeekKey();
+    const { data: cached } = await admin
+      .from('weekly_picks')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('week_key', weekKey)
+      .maybeSingle();
+
+    if (cached) {
+      const cachedKey = normalize(`${cached.brand}${cached.model}`);
+      const cachedNowOwned = allExcluded.some(p => normalize(`${p.brand}${p.model}`) === cachedKey);
+      if (!cachedNowOwned) {
+        return json({
+          brand:       cached.brand,
+          model:       cached.model,
+          why:         cached.why,
+          category:    cached.category,
+          weekKey:     cached.week_key,
+          generatedAt: cached.generated_at,
+          videoId:     cached.video_id ?? null,
+          videoTitle:  cached.video_title ?? null,
+          isTpcVideo:  cached.is_tpc_video ?? false,
+          fromCache:   true,
+        });
+      }
+      // Cached pick is now owned — delete it so we generate a fresh one
+      await admin.from('weekly_picks').delete().eq('id', cached.id);
+    }
+
     const expertProfile = profileRow.pedal_expert_profile as {
       genres?: string[]; tone_identity?: string; playing_style?: string
     } | null;
@@ -290,9 +297,7 @@ serve(async (req) => {
 
     // Server-side guard: reject picks that match anything the user already owns,
     // wishlisted, or previously owned — catches cases where the model ignores the prompt.
-    const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
     const pickKey = normalize(`${pick.brand}${pick.model}`);
-    const allExcluded = [...owned, ...wishlist, ...retired];
     const collision = allExcluded.some(p => normalize(`${p.brand}${p.model}`) === pickKey);
     if (collision) {
       console.warn('[weekly-pick] Claude returned excluded pedal:', pick.brand, pick.model);
